@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import torch
+import triton
+import triton.language as tl
+
+MAX_K = 16
+
+
+@triton.jit
+def _causal_dwconv_fwd_kernel(
+    X_ptr,
+    W_ptr,
+    OUT_ptr,
+    T,
+    k,
+    stride_xb,
+    stride_xt,
+    stride_xd,
+    stride_ob,
+    stride_ot,
+    stride_od,
+    BLOCK_T: tl.constexpr,
+    MAX_K: tl.constexpr,
+):
+    b = tl.program_id(0)
+    ch = tl.program_id(1)
+
+    ki_range = tl.arange(0, MAX_K)
+    w = tl.load(W_ptr + ch * k + ki_range, mask=ki_range < k, other=0.0)
+
+    for t_base in range(0, T, BLOCK_T):
+        t = t_base + tl.arange(0, BLOCK_T)
+        t_mask = t < T
+        t_src = t[None, :] - (k - 1) + ki_range[:, None]
+        valid = t_mask[None, :] & (t_src >= 0) & (ki_range < k)[:, None]
+        x_vals = tl.load(
+            X_ptr + b * stride_xb + t_src * stride_xt + ch * stride_xd,
+            mask=valid,
+            other=0.0,
+        ).to(tl.float32)
+        tl.store(
+            OUT_ptr + b * stride_ob + t * stride_ot + ch * stride_od,
+            tl.sum(x_vals * w[:, None], axis=0),
+            mask=t_mask,
+        )
+
+
+@triton.jit
+def _causal_dwconv_bwd_kernel(
+    dOUT_ptr,
+    X_ptr,
+    W_ptr,
+    dX_ptr,
+    dW_ptr,
+    T,
+    k,
+    stride_b,
+    stride_t,
+    stride_d,
+    BLOCK_T: tl.constexpr,
+    MAX_K: tl.constexpr,
+):
+    b = tl.program_id(0)
+    ch = tl.program_id(1)
+
+    ki_range = tl.arange(0, MAX_K)
+    w = tl.load(W_ptr + ch * k + ki_range, mask=ki_range < k, other=0.0)
+
+    for t_base in range(0, T, BLOCK_T):
+        t = t_base + tl.arange(0, BLOCK_T)
+        t_mask = t < T
+        t_prime = t[None, :] + (k - 1) - ki_range[:, None]
+        valid = (
+            t_mask[None, :] & (t_prime >= 0) & (t_prime < T) & (ki_range < k)[:, None]
+        )
+        d_outs = tl.load(
+            dOUT_ptr + b * stride_b + t_prime * stride_t + ch * stride_d,
+            mask=valid,
+            other=0.0,
+        )
+        tl.store(
+            dX_ptr + b * stride_b + t * stride_t + ch * stride_d,
+            tl.sum(d_outs * w[:, None], axis=0),
+            mask=t_mask,
+        )
+
+    dw_accs = tl.zeros((MAX_K,), dtype=tl.float32)
+    for t_base in range(0, T, BLOCK_T):
+        t = t_base + tl.arange(0, BLOCK_T)
+        t_mask = t < T
+        d_out = tl.load(
+            dOUT_ptr + b * stride_b + t * stride_t + ch * stride_d,
+            mask=t_mask,
+            other=0.0,
+        ).to(tl.float32)
+        t_src = t[None, :] + ki_range[:, None] - (k - 1)
+        valid = t_mask[None, :] & (t_src >= 0) & (ki_range < k)[:, None]
+        x_vals = tl.load(
+            X_ptr + b * stride_b + t_src * stride_t + ch * stride_d,
+            mask=valid,
+            other=0.0,
+        ).to(tl.float32)
+        dw_accs = dw_accs + tl.sum(d_out[None, :] * x_vals, axis=1)
+
+    tl.atomic_add(dW_ptr + ch * k + ki_range, dw_accs, mask=ki_range < k)
+
+
+def causal_dwconv_fwd(
+    x_dt: torch.Tensor,  # (B, d, T) float32, contiguous
+    W_conv: torch.Tensor,
+    T: int,
+    k: int,
+    BLOCK_T: int,
+) -> torch.Tensor:
+    B, d, _ = x_dt.shape
+    out = torch.empty(B, d, T, dtype=torch.float32, device=x_dt.device)
+    _causal_dwconv_fwd_kernel[(B, d)](
+        x_dt,
+        W_conv,
+        out,
+        T,
+        k,
+        x_dt.stride(0),
+        x_dt.stride(2),
+        x_dt.stride(1),
+        out.stride(0),
+        out.stride(2),
+        out.stride(1),
+        BLOCK_T=BLOCK_T,
+        MAX_K=MAX_K,
+    )
+    return out
+
+
+def causal_dwconv_bwd(
+    d_conv_dt: torch.Tensor,  # (B, d, T) float32, contiguous
+    x_dt: torch.Tensor,  # (B, d, T) float32, contiguous
+    W_conv: torch.Tensor,
+    T: int,
+    k: int,
+    BLOCK_T: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    B, d, _ = x_dt.shape
+    dX_dt = torch.zeros(B, d, T, dtype=torch.float32, device=x_dt.device)
+    dW_conv = torch.zeros_like(W_conv)
+    _causal_dwconv_bwd_kernel[(B, d)](
+        d_conv_dt,
+        x_dt,
+        W_conv,
+        dX_dt,
+        dW_conv,
+        T,
+        k,
+        d_conv_dt.stride(0),
+        d_conv_dt.stride(2),
+        d_conv_dt.stride(1),
+        BLOCK_T=BLOCK_T,
+        MAX_K=MAX_K,
+    )
+    return dX_dt, dW_conv
