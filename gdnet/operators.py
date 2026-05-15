@@ -6,10 +6,10 @@ import torch.nn.functional as F
 class TransitionOperators(nn.Module):
     r"""Learned transition operators over chunk representations.
 
-    A bank of :math:`n\_ops` linear operators :math:`W_a \in \mathbb{R}^{d \times d}`
+    A bank of n_ops linear operators W_a in R^(d x d)
     that predict the next chunk representation from the current one. A soft router
     assigns fractional weights to all operators, preventing winner-take-all collapse.
-    The router temperature :math:`\tau` is learned and starts at 1.0.
+    The router temperature tau is learned and starts at 1.0.
 
     Args:
         d: Representation dimension.

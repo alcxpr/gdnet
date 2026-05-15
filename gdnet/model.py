@@ -55,7 +55,7 @@ class GDNet(nn.Module):
         self.layers = nn.ModuleList([GDLayer(d, kernel_size) for _ in range(n_layers)])
         self.proj_out = nn.Linear(d, d_embed, bias=False)
         self.head = nn.Linear(d_embed, vocab_size, bias=False)
-        self.head.weight = self.embed.weight  # weight tying
+        self.head.weight = self.embed.weight
 
         self.cam = CAM(d, d_c, d_sig, n_slots, chunk_size)
         self.trans_ops = TransitionOperators(d, n_ops)
@@ -84,9 +84,9 @@ class GDNet(nn.Module):
             Updated `(fwd, side)`.
         """
         for i, layer in enumerate(self.layers):
-            fwd, side[i] = layer.fwd_step(fwd, side[i])
+            fwd, side[i] = layer.fwd_step(fwd, side[i])  # type: ignore
         for i, layer in reversed(list(enumerate(self.layers))):
-            fwd, side[i] = layer.bwd_step(fwd, side[i])
+            fwd, side[i] = layer.bwd_step(fwd, side[i])  # type: ignore
         return fwd, side
 
     def forward(
@@ -124,27 +124,29 @@ class GDNet(nn.Module):
         """
         B, T = tokens.shape
         fwd = self.proj_in(self.embed(tokens))
+        dtype, device = fwd.dtype, fwd.device
         side: list[torch.Tensor] = [
-            torch.zeros(B, T, self.d, device=tokens.device) for _ in self.layers
+            torch.zeros(B, T, self.d, dtype=dtype, device=device)  # type: ignore
+            for _ in self.layers
         ]
 
         if buffer_tags is None:
-            buffer_tags = torch.zeros(
-                B, self.cam.n_slots, self.cam.d_sig, device=tokens.device
+            buffer_tags = torch.zeros(  # type: ignore
+                B, self.cam.n_slots, self.cam.d_sig, dtype=dtype, device=device
             )
         if buffer_vals is None:
-            buffer_vals = torch.zeros(
-                B, self.cam.n_slots, self.cam.d_c, device=tokens.device
+            buffer_vals = torch.zeros(  # type: ignore
+                B, self.cam.n_slots, self.cam.d_c, dtype=dtype, device=device
             )
 
         gate_vals: list[torch.Tensor] = []
         for _ in range(self.n_cycles):
             if return_gates:
                 for i, layer in enumerate(self.layers):
-                    fwd, side[i], g = layer.fwd_step(fwd, side[i], return_gate=True)
+                    fwd, side[i], g = layer.fwd_step(fwd, side[i], return_gate=True)  # type: ignore
                     gate_vals.append(g)
                 for i, layer in reversed(list(enumerate(self.layers))):
-                    fwd, side[i] = layer.bwd_step(fwd, side[i])
+                    fwd, side[i] = layer.bwd_step(fwd, side[i])  # type: ignore
             else:
                 fwd, side = self.one_cycle(fwd, side)
 
@@ -202,7 +204,7 @@ class GDNet(nn.Module):
                 break
             _, side, _, _, _, _ = self.forward(x.to(device))
             samples.append(side[0].mean(dim=1).cpu())
-        return torch.cat(samples, dim=0)
+        return torch.cat(samples, dim=0)  # type: ignore
 
     @torch.no_grad()
     def generate(
@@ -228,8 +230,8 @@ class GDNet(nn.Module):
         self.eval()
         device = next(self.parameters()).device
         ids = input_ids.to(device)
-        buffer_tags = torch.zeros(1, self.cam.n_slots, self.cam.d_sig, device=device)
-        buffer_vals = torch.zeros(1, self.cam.n_slots, self.cam.d_c, device=device)
+        buffer_tags = torch.zeros(1, self.cam.n_slots, self.cam.d_sig, device=device)  # type: ignore
+        buffer_vals = torch.zeros(1, self.cam.n_slots, self.cam.d_c, device=device)  # type: ignore
 
         for step in range(max_new_tokens):
             ctx = ids[:, -self.chunk_size :]
@@ -243,11 +245,11 @@ class GDNet(nn.Module):
 
             logits_last = logits[:, -1, :] / temperature
             probs = F.softmax(logits_last, dim=-1)
-            sorted_probs, sorted_idx = torch.sort(probs, descending=True)
-            cumprobs = torch.cumsum(sorted_probs, dim=-1)
+            sorted_probs, sorted_idx = torch.sort(probs, descending=True)  # type: ignore
+            cumprobs = torch.cumsum(sorted_probs, dim=-1)  # type: ignore
             sorted_probs[~((cumprobs - sorted_probs) < top_p)] = 0
             sorted_probs /= sorted_probs.sum()
-            next_id = sorted_idx[0, torch.multinomial(sorted_probs[0], 1)]
-            ids = torch.cat([ids, next_id.unsqueeze(0)], dim=1)
+            next_id = sorted_idx[0, torch.multinomial(sorted_probs[0], 1)]  # type: ignore
+            ids = torch.cat([ids, next_id.unsqueeze(0)], dim=1)  # type: ignore
 
         return ids

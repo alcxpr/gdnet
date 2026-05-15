@@ -107,14 +107,14 @@ def _causal_dwconv_bwd_kernel(
 
 
 def causal_dwconv_fwd(
-    x_dt: torch.Tensor,  # (B, d, T) float32, contiguous
+    x_dt: torch.Tensor,
     W_conv: torch.Tensor,
     T: int,
     k: int,
     BLOCK_T: int,
 ) -> torch.Tensor:
     B, d, _ = x_dt.shape
-    out = torch.empty(B, d, T, dtype=torch.float32, device=x_dt.device)
+    out = torch.empty(B, d, T, dtype=torch.float32, device=x_dt.device)  # type: ignore
     _causal_dwconv_fwd_kernel[(B, d)](
         x_dt,
         W_conv,
@@ -127,23 +127,23 @@ def causal_dwconv_fwd(
         out.stride(0),
         out.stride(2),
         out.stride(1),
-        BLOCK_T=BLOCK_T,
-        MAX_K=MAX_K,
+        BLOCK_T=BLOCK_T,  # type: ignore
+        MAX_K=MAX_K,  # type: ignore
     )
     return out
 
 
 def causal_dwconv_bwd(
-    d_conv_dt: torch.Tensor,  # (B, d, T) float32, contiguous
-    x_dt: torch.Tensor,  # (B, d, T) float32, contiguous
+    d_conv_dt: torch.Tensor,
+    x_dt: torch.Tensor,
     W_conv: torch.Tensor,
     T: int,
     k: int,
     BLOCK_T: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, d, _ = x_dt.shape
-    dX_dt = torch.zeros(B, d, T, dtype=torch.float32, device=x_dt.device)
-    dW_conv = torch.zeros_like(W_conv)
+    dX_dt = torch.zeros(B, d, T, dtype=torch.float32, device=x_dt.device)  # type: ignore
+    dW_conv = torch.zeros_like(W_conv)  # type: ignore
     _causal_dwconv_bwd_kernel[(B, d)](
         d_conv_dt,
         x_dt,
@@ -155,7 +155,7 @@ def causal_dwconv_bwd(
         d_conv_dt.stride(0),
         d_conv_dt.stride(2),
         d_conv_dt.stride(1),
-        BLOCK_T=BLOCK_T,
-        MAX_K=MAX_K,
+        BLOCK_T=BLOCK_T,  # type: ignore
+        MAX_K=MAX_K,  # type: ignore
     )
     return dX_dt, dW_conv

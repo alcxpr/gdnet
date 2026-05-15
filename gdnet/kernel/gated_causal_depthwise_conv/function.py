@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 import triton
-import triton.language as tl
 
 from .conv import MAX_K, causal_dwconv_bwd, causal_dwconv_fwd
 from .gate_norm import gate_stream_update_fwd, gate_w2_bwd, rmsnorm_bwd, rmsnorm_fwd
@@ -25,6 +24,7 @@ class GatedCausalDepthwiseConvFunction(torch.autograd.Function):
         b2: torch.Tensor,
         eps: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        dtype = x.dtype
         B, T, d = x.shape
         k = W_conv.shape[1]
         n_rows = B * T
@@ -35,11 +35,19 @@ class GatedCausalDepthwiseConvFunction(torch.autograd.Function):
         BLOCK_T = min(triton.next_power_of_2(T), 64)
         BLOCK_D = d
 
-        x_dt = x.contiguous().permute(0, 2, 1).contiguous()
-        side_flat = side.contiguous().view(n_rows, d)
-        R_flat = R.contiguous().view(n_rows, d)
+        x_dt = x.float().contiguous().permute(0, 2, 1).contiguous()
+        side_flat = side.float().contiguous().view(n_rows, d)
+        R_flat = R.float().contiguous().view(n_rows, d)
+        W_conv, W1, b1, W_norm, W2, b2 = (
+            W_conv.float(),
+            W1.float(),
+            b1.float(),
+            W_norm.float(),
+            W2.float(),
+            b2.float(),
+        )
 
-        conv_out_dt = causal_dwconv_fwd(x_dt, W_conv, T, k, BLOCK_T)
+        conv_out_dt = causal_dwconv_fwd(x_dt, W_conv, T, k, BLOCK_T)  # type: ignore
         conv_flat = conv_out_dt.permute(0, 2, 1).contiguous().view(n_rows, d)
 
         H = F.silu(F.linear(conv_flat, W1, b1))
@@ -66,11 +74,12 @@ class GatedCausalDepthwiseConvFunction(torch.autograd.Function):
         )
         ctx.B, ctx.T, ctx.d, ctx.k, ctx.eps = B, T, d, k, eps
         ctx.BLOCK_D, ctx.BLOCK_T = BLOCK_D, BLOCK_T
+        ctx.dtype = dtype
 
-        return fwd_out.view(B, T, d), side_out.view(B, T, d)
+        return fwd_out.view(B, T, d).to(dtype), side_out.view(B, T, d).to(dtype)
 
     @staticmethod
-    def backward(
+    def backward(  # type: ignore
         ctx,
         d_fwd_out: torch.Tensor,
         d_side_out: torch.Tensor,
@@ -93,8 +102,8 @@ class GatedCausalDepthwiseConvFunction(torch.autograd.Function):
         n_rows = B * T
         BLOCK_D, BLOCK_T = ctx.BLOCK_D, ctx.BLOCK_T
 
-        d_fwd_f = d_fwd_out.contiguous().view(n_rows, d).to(torch.float32)
-        d_side_f = d_side_out.contiguous().view(n_rows, d).to(torch.float32)
+        d_fwd_f = d_fwd_out.contiguous().view(n_rows, d).to(torch.float32)  # type: ignore
+        d_side_f = d_side_out.contiguous().view(n_rows, d).to(torch.float32)  # type: ignore
 
         d_h_norm, d_conv, d_side, d_R, dW2, db2, dW_norm = gate_w2_bwd(
             d_fwd_f,
@@ -123,11 +132,12 @@ class GatedCausalDepthwiseConvFunction(torch.autograd.Function):
         d_conv_dt = d_conv_total.view(B, T, d).permute(0, 2, 1).contiguous()
         dX_dt, dW_conv = causal_dwconv_bwd(d_conv_dt, x_dt, W_conv, T, k, BLOCK_T)
 
+        dtype = ctx.dtype
         return (
-            dX_dt.permute(0, 2, 1).contiguous().to(torch.bfloat16),
+            dX_dt.permute(0, 2, 1).contiguous().to(dtype),
             None,
-            d_side.view(B, T, d),
-            d_R.view(B, T, d),
+            d_side.view(B, T, d).to(dtype),
+            d_R.view(B, T, d).to(dtype),
             dW_conv,
             dW1,
             db1,

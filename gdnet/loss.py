@@ -60,9 +60,8 @@ def projected_step(
     """
     device = tokens.device
 
-    # task gradient
     optimizer.zero_grad()
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):  # type: ignore
         logits, _, _, _, gate_vals, _ = model(tokens, return_gates=True)
         loss_task = F.cross_entropy(logits.view(-1, logits.shape[-1]), targets.view(-1))
     if scaler:
@@ -70,18 +69,18 @@ def projected_step(
     else:
         loss_task.backward()
     g_task = [
-        p.grad.clone() if p.grad is not None else torch.zeros_like(p) for p in params
+        p.grad.clone() if p.grad is not None else torch.zeros_like(p)  # type: ignore
+        for p in params
     ]
 
-    # info + capability gradient
     optimizer.zero_grad()
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):  # type: ignore
         logits, _, _, _, gate_vals, _ = model(tokens, return_gates=True)
-        loss_info = gate_info_loss_from_vals(gate_vals, model.n_layers)
+        loss_info = gate_info_loss_from_vals(gate_vals, model.n_layers)  # type: ignore
 
         if model.cam_enabled:
-            side_rand = torch.randn(tokens.shape[0], model.d, device=device)
-            loss_info = loss_info + 0.1 * model.cam.recon_loss(side_rand)
+            side_rand = torch.randn(tokens.shape[0], model.d, device=device)  # type: ignore
+            loss_info = loss_info + 0.1 * model.cam.recon_loss(side_rand)  # type: ignore
 
         if model.trans_enabled and tokens.shape[1] >= 2:
             mid = tokens.shape[1] // 2
@@ -89,19 +88,19 @@ def projected_step(
             _, side2, _, _, _, _ = model(tokens[:, mid:])
             z_t = side1[0].mean(dim=1)
             z_t1 = side2[0].mean(dim=1).detach()
-            loss_info = loss_info + 0.1 * model.trans_ops.loss(z_t, z_t1)
+            loss_info = loss_info + 0.1 * model.trans_ops.loss(z_t, z_t1)  # type: ignore
 
     if scaler:
         scaler.scale(loss_info).backward()
     else:
         loss_info.backward()
     g_info = [
-        p.grad.clone() if p.grad is not None else torch.zeros_like(p) for p in params
+        p.grad.clone() if p.grad is not None else torch.zeros_like(p)  # type: ignore
+        for p in params
     ]
 
-    # project g_info onto nullspace of g_task
-    flat_task = torch.cat([g.flatten() for g in g_task])
-    flat_info = torch.cat([g.flatten() for g in g_info])
+    flat_task = torch.cat([g.flatten() for g in g_task])  # type: ignore
+    flat_info = torch.cat([g.flatten() for g in g_info])  # type: ignore
     denom = flat_task.dot(flat_task).clamp(min=1e-8)
     proj_coef = flat_info.dot(flat_task) / denom
     flat_perp = flat_info - proj_coef * flat_task
@@ -120,5 +119,5 @@ def projected_step(
     else:
         optimizer.step()
 
-    model.cam.invalidate_cache()
+    model.cam.invalidate_cache()  # type: ignore
     return loss_task.item()

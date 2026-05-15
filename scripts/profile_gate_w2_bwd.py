@@ -7,8 +7,8 @@ import torch
 import torch.nn.functional as F
 import triton
 
-from kernel.gated_causal_depthwise_conv.conv import causal_dwconv_fwd
-from kernel.gated_causal_depthwise_conv.gate_norm import gate_w2_bwd, rmsnorm_fwd
+from gdnet.kernel.gated_causal_depthwise_conv.conv import causal_dwconv_fwd
+from gdnet.kernel.gated_causal_depthwise_conv.gate_norm import gate_w2_bwd, rmsnorm_fwd
 
 B, T, d, k = 4, 512, 512, 7
 n_rows = B * T

@@ -1,8 +1,13 @@
+from contextlib import contextmanager
+from typing import Generator
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from kernel.gated_causal_depthwise_conv import gated_causal_depthwise_conv
+from .kernel.gated_causal_depthwise_conv import gated_causal_depthwise_conv
+
+_SN_PREFIXES = ("gf", "gb", "rf", "rb")
 
 
 def _sync_sn(m: nn.Module) -> None:
@@ -10,11 +15,43 @@ def _sync_sn(m: nn.Module) -> None:
         hook(m, None)
 
 
+@contextmanager
+def freeze_sn_iteration(module: nn.Module) -> Generator[None, None, None]:
+    """Skip spectral norm power iteration for one forward pass.
+
+    Sigma is recomputed from the cached u/v vectors (no GEMV), and
+    weight = weight_orig / sigma is still applied. Use every K steps to
+    amortize the GEMV cost without sacrificing stability.
+
+    K=50 is a good default - sigma drift is negligible and it recovers most of
+    the GEMV overhead. Lower K is safer early in training if you're unsure.
+
+    Usage::
+        for step, batch in enumerate(loader):
+            ctx = freeze_sn_iteration(model) if step % 50 != 0 else nullcontext()
+            with ctx:
+                loss = train_step(model, batch)
+    """
+    hooks = [
+        hook
+        for m in module.modules()
+        for hook in m._forward_pre_hooks.values()
+        if hasattr(hook, "n_power_iterations")
+    ]
+    for h in hooks:
+        h.n_power_iterations = 0  # type: ignore
+    try:
+        yield
+    finally:
+        for h in hooks:
+            h.n_power_iterations = 1  # type: ignore
+
+
 class CausalDepthWiseConv1d(nn.Module):
     r"""Causal depthwise convolution over sequences.
 
-    Each position attends only to itself and the preceding :math:`size - 1` positions.
-    Depthwise groups keep the cost at :math:`O(d \cdot size)` per layer rather than :math:`O(d^2 \cdot size)`.
+    Each position attends only to itself and the preceding size - 1 positions.
+    Depthwise groups keep the cost at O(d . size) per layer rather than O(d^2 . size).
 
     Args:
         d: Channel dimension.
@@ -59,7 +96,7 @@ class GDLayer(nn.Module):
             W2 = nn.Linear(d, d)
             norm = nn.RMSNorm(d)
             nn.init.normal_(W2.weight, std=0.01)
-            nn.init.constant_(W2.bias, 2.0)  # The gates need to start open ~0.95.
+            nn.init.constant_(W2.bias, 2.0)
             setattr(self, f"{prefix}_W1", W1)
             setattr(self, f"{prefix}_W2", W2)
             setattr(self, f"{prefix}_norm", norm)
@@ -69,7 +106,7 @@ class GDLayer(nn.Module):
             W2 = nn.Linear(d, d)
             norm = nn.RMSNorm(d)
             nn.init.normal_(W2.weight, std=0.01)
-            nn.init.constant_(W2.bias, -2.0)  # The recovery starts closed ~0.12.
+            nn.init.constant_(W2.bias, -2.0)
             setattr(self, f"{prefix}_W1", W1)
             setattr(self, f"{prefix}_W2", W2)
             setattr(self, f"{prefix}_norm", norm)
@@ -99,12 +136,12 @@ class GDLayer(nn.Module):
             fwd_t,
             side,
             R,
-            self.conv_fwd.conv.weight.squeeze(1).float(),
-            self.gf_W1.weight.float(),  # type: ignore
-            self.gf_W1.bias.float(),  # type: ignore
-            self.gf_norm.weight.float(),  # type: ignore
-            self.gf_W2.weight.float(),  # type: ignore
-            self.gf_W2.bias.float(),  # type: ignore
+            self.conv_fwd.conv.weight.squeeze(1),
+            self.gf_W1.weight,  # type: ignore
+            self.gf_W1.bias,  # type: ignore
+            self.gf_norm.weight,  # type: ignore
+            self.gf_W2.weight,  # type: ignore
+            self.gf_W2.bias,  # type: ignore
         )
         if return_gate:
             return fwd_new, side_new, self._gate("gf", fwd_t)
@@ -123,10 +160,10 @@ class GDLayer(nn.Module):
             fwd_t,
             side,
             R,
-            self.conv_bwd.conv.weight.squeeze(1).float(),
-            self.gb_W1.weight.float(),  # type: ignore
-            self.gb_W1.bias.float(),  # type: ignore
-            self.gb_norm.weight.float(),  # type: ignore
-            self.gb_W2.weight.float(),  # type: ignore
-            self.gb_W2.bias.float(),  # type: ignore
+            self.conv_bwd.conv.weight.squeeze(1),
+            self.gb_W1.weight,  # type: ignore
+            self.gb_W1.bias,  # type: ignore
+            self.gb_norm.weight,  # type: ignore
+            self.gb_W2.weight,  # type: ignore
+            self.gb_W2.bias,  # type: ignore
         )

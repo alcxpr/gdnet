@@ -8,9 +8,12 @@ import torch
 import torch.nn.functional as F
 import triton
 
-from kernel.gated_causal_depthwise_conv import gated_causal_depthwise_conv
-from kernel.gated_causal_depthwise_conv.conv import causal_dwconv_bwd, causal_dwconv_fwd
-from kernel.gated_causal_depthwise_conv.gate_norm import (
+from gdnet.kernel.gated_causal_depthwise_conv import gated_causal_depthwise_conv
+from gdnet.kernel.gated_causal_depthwise_conv.conv import (
+    causal_dwconv_bwd,
+    causal_dwconv_fwd,
+)
+from gdnet.kernel.gated_causal_depthwise_conv.gate_norm import (
     gate_stream_update_fwd,
     gate_w2_bwd,
     rmsnorm_bwd,

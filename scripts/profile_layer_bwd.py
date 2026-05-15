@@ -3,7 +3,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
-from src.layer import GDLayer
+from gdnet.layer import GDLayer
 
 B, T, d, k = 4, 512, 512, 7
 
