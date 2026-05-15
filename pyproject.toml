@@ -3,7 +3,7 @@ name = "gdnet"
 version = "0.1.0"
 description = "Reference implementation and utilities for GDNet"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "torch>=2.12.0",
 ]
