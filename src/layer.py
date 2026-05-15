@@ -75,32 +75,18 @@ class GDLayer(nn.Module):
             setattr(self, f"{prefix}_norm", norm)
 
     def _gate(self, prefix: str, x: torch.Tensor) -> torch.Tensor:
-        W1   = getattr(self, f"{prefix}_W1")
-        W2   = getattr(self, f"{prefix}_W2")
+        W1 = getattr(self, f"{prefix}_W1")
+        W2 = getattr(self, f"{prefix}_W2")
         norm = getattr(self, f"{prefix}_norm")
         return F.sigmoid(W2(norm(F.silu(W1(x)))))
 
     def _recovery(
         self, prefix: str, side: torch.Tensor, fwd: torch.Tensor
     ) -> torch.Tensor:
-        """Compute recovery gate values.
-
-        Conditioned on both `side` and `fwd` so that a trigger in `fwd` can
-        activate recall of content stored in `side` even when the two are
-        geometrically orthogonal.
-
-        Args:
-            prefix: Parameter prefix, one of `gf` or `gb`.
-            side: Side stream `(B, T, d)`.
-            fwd: Forward stream `(B, T, d)`.
-
-        Returns:
-            Recovery gate values in `(0, 1)^d`, shape `(B, T, d)`.
-        """
         W1 = getattr(self, f"{prefix}_W1")
         W2 = getattr(self, f"{prefix}_W2")
         norm = getattr(self, f"{prefix}_norm")
-        return F.sigmoid(norm(W2(F.silu(W1(torch.cat([side, fwd], dim=-1))))))  # type: ignore[reportPrivateImportUsage]
+        return F.sigmoid(norm(W2(F.silu(W1(torch.cat([side, fwd], dim=-1))))))  # type: ignore
 
     def fwd_step(
         self, fwd: torch.Tensor, side: torch.Tensor, return_gate: bool = False
@@ -109,26 +95,38 @@ class GDLayer(nn.Module):
         R = self._recovery("rf", side, fwd_t)
         _sync_sn(self.gf_W1)  # type: ignore
         fwd_new, side_new = gated_causal_depthwise_conv(
-            fwd, fwd_t, side, R,
+            fwd,
+            fwd_t,
+            side,
+            R,
             self.conv_fwd.conv.weight.squeeze(1).float(),
-            self.gf_W1.weight.float(), self.gf_W1.bias.float(),  # type: ignore
+            self.gf_W1.weight.float(),  # type: ignore
+            self.gf_W1.bias.float(),  # type: ignore
             self.gf_norm.weight.float(),  # type: ignore
-            self.gf_W2.weight.float(), self.gf_W2.bias.float(),  # type: ignore
+            self.gf_W2.weight.float(),  # type: ignore
+            self.gf_W2.bias.float(),  # type: ignore
         )
         if return_gate:
             return fwd_new, side_new, self._gate("gf", fwd_t)
         return fwd_new, side_new
 
     def bwd_step(
-        self, fwd: torch.Tensor, side: torch.Tensor,
+        self,
+        fwd: torch.Tensor,
+        side: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         fwd_t: torch.Tensor = self.conv_bwd(fwd)
         R = self._recovery("rb", side, fwd_t)
         _sync_sn(self.gb_W1)  # type: ignore
         return gated_causal_depthwise_conv(
-            fwd, fwd_t, side, R,
+            fwd,
+            fwd_t,
+            side,
+            R,
             self.conv_bwd.conv.weight.squeeze(1).float(),
-            self.gb_W1.weight.float(), self.gb_W1.bias.float(),  # type: ignore
+            self.gb_W1.weight.float(),  # type: ignore
+            self.gb_W1.bias.float(),  # type: ignore
             self.gb_norm.weight.float(),  # type: ignore
-            self.gb_W2.weight.float(), self.gb_W2.bias.float(),  # type: ignore
+            self.gb_W2.weight.float(),  # type: ignore
+            self.gb_W2.bias.float(),  # type: ignore
         )
