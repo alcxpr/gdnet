@@ -1,6 +1,7 @@
 <div align="center">
     <!-- TODO: Add logo -->
     <h1> Gated Dissipative Network </h1>
+    <p><em>Working Repository</em></p>
     <p>
         <!-- TODO: Add useful links -->
     </p>
