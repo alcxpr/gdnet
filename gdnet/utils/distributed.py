@@ -112,7 +112,7 @@ def wrap_fsdp(
         )
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"cuda:{local_rank}")  # type: ignore
 
     layer_cls = _detect_layer_cls(model)
     if layer_cls is not None:

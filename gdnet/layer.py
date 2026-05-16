@@ -2,10 +2,13 @@ from contextlib import contextmanager
 from typing import Generator
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+import triton
 
-from .kernel.gated_causal_depthwise_conv import gated_causal_depthwise_conv
+from .kernel.gated_causal_depthwise_conv import CausalDWConvFunction, CausalDWConvFunctionSP, gated_output
+from .utils.sp import SPHaloExchange
 
 _SN_PREFIXES = ("gf", "gb", "rf", "rb")
 
@@ -125,45 +128,141 @@ class GDLayer(nn.Module):
         norm = getattr(self, f"{prefix}_norm")
         return F.sigmoid(norm(W2(F.silu(W1(torch.cat([side, fwd], dim=-1))))))  # type: ignore
 
+    def _conv_flat(
+        self,
+        fwd: torch.Tensor,
+        conv_module: CausalDepthWiseConv1d,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute causal conv via Triton, return (conv_3d, conv_flat).
+
+        conv_3d is (B, T, d) float32; conv_flat is (B*T, d) float32.
+        Both share the same storage — use conv_3d for R, conv_flat for gated_output.
+        """
+        B, T, d = fwd.shape
+        k = conv_module.size
+        BLOCK_T = min(triton.next_power_of_2(T), 64)
+        x_dt = fwd.float().permute(0, 2, 1).contiguous()
+        W_conv = conv_module.conv.weight.float().squeeze(1)
+        conv_out_dt = CausalDWConvFunction.apply(x_dt, W_conv, T, k, BLOCK_T)
+        conv_3d = conv_out_dt.permute(0, 2, 1).contiguous()
+        return conv_3d, conv_3d.view(B * T, d)
+
+    def _conv_flat_sp(
+        self,
+        fwd: torch.Tensor,
+        conv_module: CausalDepthWiseConv1d,
+        sp_group: dist.ProcessGroup,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """SP variant: halo exchange then Triton conv, return (conv_3d, conv_flat)."""
+        B, T, d = fwd.shape
+        k = conv_module.size
+        BLOCK_T = min(triton.next_power_of_2(T), 64)
+        x_dt = fwd.float().permute(0, 2, 1).contiguous()
+        W_conv = conv_module.conv.weight.float().squeeze(1)
+        edge = x_dt[:, :, -(k - 1):].contiguous()
+        halo_dt = SPHaloExchange.apply(edge, sp_group)
+        conv_out_dt = CausalDWConvFunctionSP.apply(x_dt, halo_dt, W_conv, T, k, BLOCK_T)
+        conv_3d = conv_out_dt.permute(0, 2, 1).contiguous()
+        return conv_3d, conv_3d.view(B * T, d)
+
     def fwd_step(
         self, fwd: torch.Tensor, side: torch.Tensor, return_gate: bool = False
     ) -> tuple[torch.Tensor, ...]:
-        fwd_t: torch.Tensor = self.conv_fwd(fwd)
-        R = self._recovery("rf", side, fwd_t)
+        B, T, d = fwd.shape
+        conv_3d, conv_flat = self._conv_flat(fwd, self.conv_fwd)
+        R = self._recovery("rf", side, conv_3d.to(fwd.dtype))
         _sync_sn(self.gf_W1)  # type: ignore
-        fwd_new, side_new = gated_causal_depthwise_conv(
-            fwd,
-            fwd_t,
-            side,
-            R,
-            self.conv_fwd.conv.weight.squeeze(1),
-            self.gf_W1.weight,  # type: ignore
-            self.gf_W1.bias,  # type: ignore
+        fwd_out, side_out = gated_output(
+            conv_flat, side, R,
+            self.gf_W1.weight, self.gf_W1.bias,  # type: ignore
             self.gf_norm.weight,  # type: ignore
-            self.gf_W2.weight,  # type: ignore
-            self.gf_W2.bias,  # type: ignore
+            self.gf_W2.weight, self.gf_W2.bias,  # type: ignore
         )
         if return_gate:
-            return fwd_new, side_new, self._gate("gf", fwd_t)
-        return fwd_new, side_new
+            return (
+                fwd_out.view(B, T, d).to(fwd.dtype),
+                side_out.view(B, T, d).to(fwd.dtype),
+                self._gate("gf", conv_3d),
+            )
+        return fwd_out.view(B, T, d).to(fwd.dtype), side_out.view(B, T, d).to(fwd.dtype)
+
+    def fwd_step_sp(
+        self,
+        fwd: torch.Tensor,
+        side: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+        return_gate: bool = False,
+    ) -> tuple[torch.Tensor, ...]:
+        """SP variant of fwd_step: performs halo exchange before the causal conv.
+
+        Args:
+            fwd: Local forward stream (B, T_local, d).
+            side: Local side stream (B, T_local, d).
+            sp_group: Sequence-parallel process group.
+            return_gate: If True, also return the gate values.
+
+        Returns:
+            (fwd_out, side_out) or (fwd_out, side_out, gate) if return_gate.
+        """
+        B, T, d = fwd.shape
+        conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_fwd, sp_group)
+        R = self._recovery("rf", side, conv_3d.to(fwd.dtype))
+        _sync_sn(self.gf_W1)  # type: ignore
+        fwd_out, side_out = gated_output(
+            conv_flat, side, R,
+            self.gf_W1.weight, self.gf_W1.bias,  # type: ignore
+            self.gf_norm.weight,  # type: ignore
+            self.gf_W2.weight, self.gf_W2.bias,  # type: ignore
+        )
+        if return_gate:
+            return (
+                fwd_out.view(B, T, d).to(fwd.dtype),
+                side_out.view(B, T, d).to(fwd.dtype),
+                self._gate("gf", conv_3d),
+            )
+        return fwd_out.view(B, T, d).to(fwd.dtype), side_out.view(B, T, d).to(fwd.dtype)
 
     def bwd_step(
         self,
         fwd: torch.Tensor,
         side: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        fwd_t: torch.Tensor = self.conv_bwd(fwd)
-        R = self._recovery("rb", side, fwd_t)
+        B, T, d = fwd.shape
+        conv_3d, conv_flat = self._conv_flat(fwd, self.conv_bwd)
+        R = self._recovery("rb", side, conv_3d.to(fwd.dtype))
         _sync_sn(self.gb_W1)  # type: ignore
-        return gated_causal_depthwise_conv(
-            fwd,
-            fwd_t,
-            side,
-            R,
-            self.conv_bwd.conv.weight.squeeze(1),
-            self.gb_W1.weight,  # type: ignore
-            self.gb_W1.bias,  # type: ignore
+        fwd_out, side_out = gated_output(
+            conv_flat, side, R,
+            self.gb_W1.weight, self.gb_W1.bias,  # type: ignore
             self.gb_norm.weight,  # type: ignore
-            self.gb_W2.weight,  # type: ignore
-            self.gb_W2.bias,  # type: ignore
+            self.gb_W2.weight, self.gb_W2.bias,  # type: ignore
         )
+        return fwd_out.view(B, T, d).to(fwd.dtype), side_out.view(B, T, d).to(fwd.dtype)
+
+    def bwd_step_sp(
+        self,
+        fwd: torch.Tensor,
+        side: torch.Tensor,
+        sp_group: dist.ProcessGroup,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """SP variant of bwd_step: performs halo exchange before the causal conv.
+
+        Args:
+            fwd: Local forward stream (B, T_local, d).
+            side: Local side stream (B, T_local, d).
+            sp_group: Sequence-parallel process group.
+
+        Returns:
+            (fwd_out, side_out).
+        """
+        B, T, d = fwd.shape
+        conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_bwd, sp_group)
+        R = self._recovery("rb", side, conv_3d.to(fwd.dtype))
+        _sync_sn(self.gb_W1)  # type: ignore
+        fwd_out, side_out = gated_output(
+            conv_flat, side, R,
+            self.gb_W1.weight, self.gb_W1.bias,  # type: ignore
+            self.gb_norm.weight,  # type: ignore
+            self.gb_W2.weight, self.gb_W2.bias,  # type: ignore
+        )
+        return fwd_out.view(B, T, d).to(fwd.dtype), side_out.view(B, T, d).to(fwd.dtype)
