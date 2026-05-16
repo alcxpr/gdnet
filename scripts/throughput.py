@@ -28,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import torch
 import torch._functorch.config
 
+torch.set_float32_matmul_precision("high")
+
 from gdnet.layer import freeze_sn_iteration
 from gdnet.loss import projected_step
 from gdnet.model import GDNet
@@ -52,6 +54,11 @@ CONFIGS = [
     (4, 256),
     (4, 512),
     (8, 512),
+    (16, 512),
+    (32, 512),
+    (64, 512),
+    (32, 1024),
+    (64, 1024),
 ]
 
 
@@ -74,7 +81,7 @@ def non_embedding_params(model: GDNet) -> int:
 def estimate_flops(model: GDNet, B: int, T: int, use_cam: bool) -> float:
     N = non_embedding_params(model)
     tokens = B * T
-    # 1 fwd + 2 bwd ≈ 5x fwd; fwd ≈ 2*N*tokens
+    # 1 fwd + 2 bwd \approx 5x fwd; fwd ≈ 2*N*tokens
     step_flops = 5 * 2 * N * tokens
     cam_flops = N_WRITE * 2 * N * tokens if use_cam and model.cam_enabled else 0
     return step_flops + cam_flops
@@ -172,7 +179,7 @@ def main() -> None:
         try:
             import transformer_engine  # type: ignore  # noqa: F401
         except ImportError:
-            print("TransformerEngine not found — cannot run fp8")
+            print("TransformerEngine not found - cannot run fp8")
             return
 
     compile_flag = args.compile
