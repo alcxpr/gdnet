@@ -25,6 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
+import time
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -147,12 +149,28 @@ def run(use_pos_gate: bool) -> dict[str, list]:
 
     for epoch in range(EPOCHS):
         model.train()
+        t0 = time.perf_counter()
+        batch_times: list[float] = []
         for chunks, targets in train_dl:
+            tb = time.perf_counter()
             chunks, targets = chunks.to(DEVICE), targets.to(DEVICE)
             optimizer.zero_grad()
             logits, _, _ = model(chunks)
             F.cross_entropy(logits, targets).backward()
             optimizer.step()
+            if DEVICE.type == "cuda":
+                torch.cuda.synchronize()
+            batch_times.append(time.perf_counter() - tb)
+        epoch_time = time.perf_counter() - t0
+
+        if epoch < 2:
+            print(
+                f"  [timing/{label}] epoch={epoch + 1}"
+                f"  total={epoch_time:.2f}s"
+                f"  batch: first={batch_times[0]:.3f}s"
+                f"  mean={sum(batch_times) / len(batch_times):.3f}s"
+                f"  max={max(batch_times):.3f}s"
+            )
 
         if (epoch + 1) % 10 == 0:
             c1_acc, c1_r, c1_h = _eval(model, val_c1, has_target=True)

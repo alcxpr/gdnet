@@ -74,6 +74,7 @@ class PosGateCAM(nn.Module):
         self.W_tag = nn.Linear(d, d_sig, bias=False)
         self.W_slot = nn.Embedding(n_slots, d_sig)
         self.W_pos = nn.Linear(d_sig, d_sig, bias=False)
+        nn.init.zeros_(self.W_pos.weight)
         self.rho = nn.Parameter(torch.zeros(1))  # type: ignore
         self.W_c = nn.Linear(d, d_c, bias=False)
         self.W_up = nn.Linear(d_c, d, bias=False)
@@ -110,13 +111,13 @@ class PosGateCAM(nn.Module):
         buffer_vals: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q = self.W_tag(fwd[:, -1, :])
-        gamma = F.sigmoid(self.W_pos(q))  # type: ignore
+        gamma = F.sigmoid(self.W_pos(q))  # (B, d_sig); W_pos=0 init -> gamma=0.5
         alpha = torch.exp(self.rho)  # type: ignore
         slot_ids = torch.arange(self.n_slots, device=fwd.device)  # type: ignore
         e = self.W_slot(slot_ids)  # (n_slots, d_sig)
-        biased = buffer_tags + alpha * e.unsqueeze(0) * gamma.unsqueeze(1)
-        sim = torch.einsum("bd,bsd->bs", q, biased)  # type: ignore
-        w = F.softmax(sim, dim=-1)
+        sim_content = torch.einsum("bd,bsd->bs", q, buffer_tags)  # type: ignore
+        sim_pos = torch.einsum("bd,sd->bs", gamma, e)  # type: ignore
+        w = F.softmax(sim_content + alpha * sim_pos, dim=-1)
         retrieved_c = torch.einsum("bs,bsd->bd", w, buffer_vals)  # type: ignore
         retrieved = self.W_up(retrieved_c)
         retrieved_e = retrieved.unsqueeze(1).expand_as(fwd)
