@@ -77,7 +77,7 @@ class GatedCausalDepthwiseConvFunction(torch.autograd.Function):
         ctx.BLOCK_D, ctx.BLOCK_T = BLOCK_D, BLOCK_T
         ctx.dtype = dtype
 
-        return fwd_out.view(B, T, d).to(dtype), side_out.view(B, T, d).to(dtype)
+        return fwd_out.view(B, T, d), side_out.view(B, T, d)
 
     @staticmethod
     @torch.amp.custom_bwd(device_type="cuda")  # type: ignore
@@ -163,6 +163,8 @@ def gated_causal_depthwise_conv(
     b2: torch.Tensor,
     eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return GatedCausalDepthwiseConvFunction.apply(
+    dtype = x.dtype  # capture before custom_fwd casts to fp32
+    out_fwd, out_side = GatedCausalDepthwiseConvFunction.apply(
         x, fwd, side, R, W_conv, W1, b1, W_norm, W2, b2, eps
     )
+    return out_fwd.to(dtype), out_side.to(dtype)

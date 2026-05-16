@@ -26,6 +26,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
+import torch._functorch.config
+
+torch.set_float32_matmul_precision("high")
 
 from gdnet.layer import freeze_sn_iteration
 from gdnet.loss import projected_step
@@ -90,6 +93,7 @@ def run_config(
 ) -> tuple[float, float, float]:
     model = make_model(T)
     if compile_model:
+        torch._functorch.config.donated_buffer = False  # incompatible with retain_graph=True
         model = torch.compile(model)  # type: ignore
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)  # type: ignore
