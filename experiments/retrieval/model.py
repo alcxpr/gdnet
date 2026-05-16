@@ -79,19 +79,15 @@ class RetrievalModel(nn.Module):
             w: (B, n_slots) - retrieval weights
         """
         B, n_chunks, T = chunks.shape
-        device, dtype = chunks.device, self.embed.weight.dtype
 
-        buffer_tags = torch.zeros(  # type: ignore
-            B, self.n_slots, self.d_sig, device=device, dtype=dtype
-        )
-        buffer_vals = torch.zeros(B, self.n_slots, self.d_c, device=device, dtype=dtype)  # type: ignore
-
-        for i in range(n_chunks - 1):
-            x = self.embed(chunks[:, i, :])
-            fwd, side = self.encoder(x)
-            buffer_tags, buffer_vals = self.cam.write(
-                fwd[:, -1, :], side[0].mean(dim=1), buffer_tags, buffer_vals
-            )
+        n_write = n_chunks - 1
+        x_write = self.embed(chunks[:, :n_write, :].reshape(B * n_write, T))
+        fwd_write, side_write = self.encoder(x_write)
+        # most recent chunk -> slot 0: flip so index 0 = last written
+        tag_inp = fwd_write[:, -1, :].reshape(B, n_write, -1).flip(dims=[1])
+        val_inp = side_write[0].mean(dim=1).reshape(B, n_write, -1).flip(dims=[1])
+        buffer_tags = self.cam.W_tag(tag_inp)
+        buffer_vals = self.cam.W_c(val_inp).detach()
 
         x = self.embed(chunks[:, -1, :])
         fwd, side = self.encoder(x)
