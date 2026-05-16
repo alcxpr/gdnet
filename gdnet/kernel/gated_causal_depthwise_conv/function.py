@@ -10,6 +10,7 @@ from .gate_norm import gate_stream_update_fwd, gate_w2_bwd, rmsnorm_bwd, rmsnorm
 
 class GatedCausalDepthwiseConvFunction(torch.autograd.Function):
     @staticmethod
+    @torch.amp.custom_fwd(cast_inputs=torch.float32, device_type="cuda")  # type: ignore
     def forward(
         ctx,
         x: torch.Tensor,
@@ -79,6 +80,7 @@ class GatedCausalDepthwiseConvFunction(torch.autograd.Function):
         return fwd_out.view(B, T, d).to(dtype), side_out.view(B, T, d).to(dtype)
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")  # type: ignore
     def backward(  # type: ignore
         ctx,
         d_fwd_out: torch.Tensor,
