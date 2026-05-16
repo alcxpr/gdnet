@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.autograd.graph as ag
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
@@ -73,8 +74,10 @@ def projected_step(
     the task level set and never degrades task performance.
 
     A single forward pass is retained with `retain_graph=True` so both the task
-    and info gradients flow through the same graph. The CAM buffer (if used) is
-    populated once via `build_cam_buffer` before the shared forward pass.
+    and info gradients flow through the same graph. Saved tensors are offloaded to
+    CPU via `save_on_cpu` so the retained graph does not accumulate on GPU VRAM.
+    The CAM buffer (if used) is populated once via `build_cam_buffer` before the
+    shared forward pass.
 
     Args:
         model: The GDNet model. Must expose `n_layers`, `cam_enabled`, `trans_enabled`,
@@ -100,9 +103,10 @@ def projected_step(
             if write_chunks is not None and model.cam_enabled  # type: ignore
             else (None, None)
         )
-        logits, side, _, _, gate_vals, _, _ = model(
-            tokens, btags, bvals, return_gates=True
-        )
+        with ag.save_on_cpu(pin_memory=True):
+            logits, side, _, _, gate_vals, _, _ = model(
+                tokens, btags, bvals, return_gates=True
+            )
         loss_task = F.cross_entropy(logits.view(-1, logits.shape[-1]), targets.view(-1))
     if scaler:
         scaler.scale(loss_task).backward(retain_graph=True)
