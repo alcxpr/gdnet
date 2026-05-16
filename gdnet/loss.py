@@ -71,10 +71,9 @@ def projected_step(
     onto the nullspace of the task gradient, so it can only shape the solution within
     the task level set and never degrades task performance.
 
-    Two forward passes are performed:
-    - Pass 1: task loss + gate values collected for pass 2.
-    - Pass 2: info loss (gate austerity + optional CAM reconstruction + optional
-      capability loss), using the same gate values where possible.
+    A single forward pass is retained with `retain_graph=True` so both the task
+    and info gradients flow through the same graph. The CAM buffer (if used) is
+    populated once via `build_cam_buffer` before the shared forward pass.
 
     Args:
         model: The GDNet model. Must expose `n_layers`, `cam_enabled`, `trans_enabled`,
@@ -100,41 +99,33 @@ def projected_step(
             if write_chunks is not None and model.cam_enabled  # type: ignore
             else (None, None)
         )
-        logits, _, _, _, gate_vals, _, _ = model(
+        logits, side, _, _, gate_vals, _, _ = model(
             tokens, btags, bvals, return_gates=True
         )
         loss_task = F.cross_entropy(logits.view(-1, logits.shape[-1]), targets.view(-1))
     if scaler:
-        scaler.scale(loss_task).backward()
+        scaler.scale(loss_task).backward(retain_graph=True)
     else:
-        loss_task.backward()
+        loss_task.backward(retain_graph=True)
     g_task = [
         p.grad.clone() if p.grad is not None else torch.zeros_like(p)  # type: ignore
         for p in params
     ]
 
     optimizer.zero_grad()
-    with make_autocast(precision):  # type: ignore
-        btags, bvals = (
-            build_cam_buffer(model, write_chunks)
-            if write_chunks is not None and model.cam_enabled  # type: ignore
-            else (None, None)
-        )
-        logits, side, _, _, gate_vals, _, _ = model(
-            tokens, btags, bvals, return_gates=True
-        )
-        loss_info = gate_info_loss_from_vals(gate_vals, model.n_layers)  # type: ignore
+    loss_info = gate_info_loss_from_vals(gate_vals, model.n_layers)  # type: ignore
 
-        if model.cam_enabled:
-            loss_info = loss_info + 0.1 * model.cam.recon_loss(side[0].mean(dim=1))  # type: ignore
+    if model.cam_enabled:
+        loss_info = loss_info + 0.1 * model.cam.recon_loss(side[0].mean(dim=1))  # type: ignore
 
-        if model.trans_enabled and tokens.shape[1] >= 2:
+    if model.trans_enabled and tokens.shape[1] >= 2:
+        with make_autocast(precision):  # type: ignore
             mid = tokens.shape[1] // 2
             _, side1, _, _, _, _, _ = model(tokens[:, :mid])
             _, side2, _, _, _, _, _ = model(tokens[:, mid:])
-            z_t = side1[0].mean(dim=1)
-            z_t1 = side2[0].mean(dim=1).detach()
-            loss_info = loss_info + 0.1 * model.trans_ops.loss(z_t, z_t1)  # type: ignore
+        z_t = side1[0].mean(dim=1)
+        z_t1 = side2[0].mean(dim=1).detach()
+        loss_info = loss_info + 0.1 * model.trans_ops.loss(z_t, z_t1)  # type: ignore
 
     if scaler:
         scaler.scale(loss_info).backward()
