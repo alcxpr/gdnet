@@ -16,23 +16,23 @@ BLOCK_T = min(triton.next_power_of_2(T), 64)
 BLOCK_D = d
 
 torch.manual_seed(0)
-x = torch.randn(B, T, d, dtype=torch.bfloat16, device="cuda")
+x = torch.randn(B, T, d, dtype=torch.bfloat16, device="cuda")  # type: ignore
 side = torch.randn(B, T, d, dtype=torch.bfloat16, device="cuda")
-R = torch.sigmoid(torch.randn(B, T, d, device="cuda")).bfloat16()
+R = torch.sigmoid(torch.randn(B, T, d, device="cuda")).bfloat16()  # type: ignore
 W_conv = torch.randn(d, k, device="cuda")
 W1 = torch.randn(d, d, device="cuda")
-b1 = torch.zeros(d, device="cuda")
-W_norm = torch.ones(d, device="cuda")
+b1 = torch.zeros(d, device="cuda")  # type: ignore
+W_norm = torch.ones(d, device="cuda")  # type: ignore
 W2 = torch.randn(d, d, device="cuda")
 
 x_dt = x.float().permute(0, 2, 1).contiguous()
-conv_out_dt = causal_dwconv_fwd(x_dt, W_conv, T, k, BLOCK_T)
+conv_out_dt = causal_dwconv_fwd(x_dt, W_conv, T, k, BLOCK_T)  # type: ignore
 conv_flat = conv_out_dt.permute(0, 2, 1).contiguous().view(n_rows, d)
 side_flat = side.contiguous().view(n_rows, d)
 R_flat = R.contiguous().view(n_rows, d)
 H = F.silu(F.linear(conv_flat, W1, b1))
 H_NORM, RSTD = rmsnorm_fwd(H, W_norm, 1e-6, BLOCK_D)
-g_pre = F.linear(H_NORM, W2, torch.full((d,), 2.0, device="cuda"))
+g_pre = F.linear(H_NORM, W2, torch.full((d,), 2.0, device="cuda"))  # type: ignore
 d_fwd_f = torch.randn(n_rows, d, device="cuda")
 d_side_f = torch.randn(n_rows, d, device="cuda")
 
