@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import torch
-import torch.autograd.graph as ag
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
@@ -36,8 +35,8 @@ def build_cam_buffer(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Populate the CAM buffer by processing write chunks sequentially.
 
-    Must be called inside the same autocast context as the subsequent forward pass
-    so that gradients flow through W_tag, W_c, W_pos, and rho.
+    Runs under no_grad: W_tag and W_c receive gradients through the main forward's
+    read path and recon_loss respectively, so no write-path graph is needed.
 
     Args:
         model: GDNet model with `cam_enabled`, `cam`, and `write_cam` attributes.
@@ -50,9 +49,10 @@ def build_cam_buffer(
     device = write_chunks.device
     btags = torch.zeros(B, model.cam.n_slots, model.cam.d_sig, device=device)  # type: ignore
     bvals = torch.zeros(B, model.cam.n_slots, model.cam.d_c, device=device)  # type: ignore
-    for i in range(n_write):
-        _, side, _, _, _, _, fwd_last = model(write_chunks[:, i], btags, bvals)
-        btags, bvals = model.write_cam(fwd_last, side, btags, bvals)  # type: ignore
+    with torch.no_grad():
+        for i in range(n_write):
+            _, side, _, _, _, _, fwd_last = model(write_chunks[:, i], btags, bvals)
+            btags, bvals = model.write_cam(fwd_last, side, btags, bvals)  # type: ignore
     return btags, bvals
 
 
@@ -73,15 +73,15 @@ def projected_step(
     onto the nullspace of the task gradient, so it can only shape the solution within
     the task level set and never degrades task performance.
 
-    A single forward pass is retained with `retain_graph=True` so both the task
-    and info gradients flow through the same graph. Saved tensors are offloaded to
-    CPU via `save_on_cpu` so the retained graph does not accumulate on GPU VRAM.
-    The CAM buffer (if used) is populated once via `build_cam_buffer` before the
-    shared forward pass.
+    Uses a single forward pass shared by both backward passes via `retain_graph=True`.
+    The primary activation graph is freed immediately after the info backward (no
+    retain_graph on the second call), avoiding GPU OOM without CPU offload. Projection
+    dot products are accumulated parameter-by-parameter to avoid a full-gradient
+    concatenation spike.
 
     Args:
         model: The GDNet model. Must expose `n_layers`, `cam_enabled`, `trans_enabled`,
-            `d`, `cam`, and `trans_ops` attributes.
+            `cam`, and `trans_ops` attributes.
         params: List of parameters to optimize (from `model.parameters()`).
         optimizer: Optimizer instance.
         tokens: Input token ids `(B, T)`.
@@ -103,11 +103,12 @@ def projected_step(
             if write_chunks is not None and model.cam_enabled  # type: ignore
             else (None, None)
         )
-        with ag.save_on_cpu(pin_memory=True):
-            logits, side, _, _, gate_vals, _, _ = model(
-                tokens, btags, bvals, return_gates=True
-            )
+        logits, side, _, _, gate_vals, _, _ = model(
+            tokens, btags, bvals, return_gates=True
+        )
         loss_task = F.cross_entropy(logits.view(-1, logits.shape[-1]), targets.view(-1))
+
+    # 1. Task backward — keep graph alive for the info backward below.
     if scaler:
         scaler.scale(loss_task).backward(retain_graph=True)
     else:
@@ -118,45 +119,48 @@ def projected_step(
     ]
 
     optimizer.zero_grad()
-    loss_info = gate_info_loss_from_vals(gate_vals, model.n_layers)  # type: ignore
-
-    if model.cam_enabled:
-        loss_info = loss_info + 0.1 * model.cam.recon_loss(side[0].mean(dim=1))  # type: ignore
+    with make_autocast(precision):
+        loss_info_base = gate_info_loss_from_vals(gate_vals, model.n_layers)  # type: ignore
+        if model.cam_enabled:
+            loss_info_base = loss_info_base + 0.1 * model.cam.recon_loss(  # type: ignore
+                side[0].mean(dim=1)
+            )
+    if scaler:
+        scaler.scale(loss_info_base).backward()
+    else:
+        loss_info_base.backward()
 
     if model.trans_enabled and tokens.shape[1] >= 2:
-        with make_autocast(precision):  # type: ignore
+        with make_autocast(precision):
             mid = tokens.shape[1] // 2
             _, side1, _, _, _, _, _ = model(tokens[:, :mid])
             _, side2, _, _, _, _, _ = model(tokens[:, mid:])
-        z_t = side1[0].mean(dim=1)
-        z_t1 = side2[0].mean(dim=1).detach()
-        loss_info = loss_info + 0.1 * model.trans_ops.loss(z_t, z_t1)  # type: ignore
+            z_t = side1[0].mean(dim=1)
+            z_t1 = side2[0].mean(dim=1).detach()
+            loss_trans = 0.1 * model.trans_ops.loss(z_t, z_t1)  # type: ignore
+        if scaler:
+            scaler.scale(loss_trans).backward()
+        else:
+            loss_trans.backward()
 
-    if scaler:
-        scaler.scale(loss_info).backward()
-    else:
-        loss_info.backward()
     g_info = [
         p.grad.clone() if p.grad is not None else torch.zeros_like(p)  # type: ignore
         for p in params
     ]
 
-    flat_task = torch.cat([g.flatten() for g in g_task])  # type: ignore
-    flat_info = torch.cat([g.flatten() for g in g_info])  # type: ignore
-    denom = flat_task.dot(flat_task)
-    proj_coef_num = flat_info.dot(flat_task)
+    denom = torch.tensor(0.0, device=params[0].device, dtype=torch.float32)  # type: ignore
+    proj_coef_num = torch.tensor(0.0, device=params[0].device, dtype=torch.float32)  # type: ignore
+    for gt, gi in zip(g_task, g_info):
+        denom += gt.float().pow(2).sum()
+        proj_coef_num += (gi.float() * gt.float()).sum()
     if dist.is_initialized():
         dist.all_reduce(denom)
         dist.all_reduce(proj_coef_num)
     proj_coef = proj_coef_num / denom.clamp(min=1e-8)
-    flat_perp = flat_info - proj_coef * flat_task
 
     optimizer.zero_grad()
-    idx = 0
-    for p, gt in zip(params, g_task):
-        sz = gt.numel()
-        p.grad = gt + beta * flat_perp[idx : idx + sz].reshape(gt.shape)
-        idx += sz
+    for p, gt, gi in zip(params, g_task, g_info):
+        p.grad = gt + beta * (gi - proj_coef * gt)
 
     if scaler:
         scaler.unscale_(optimizer)
