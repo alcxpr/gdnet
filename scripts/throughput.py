@@ -38,10 +38,14 @@ from gdnet.utils.fp8 import Precision
 VOCAB_SIZE = 1024
 N_WRITE = 4
 
-# H100 SXM non-sparse tensor core peak TFLOPS
+# Effective peak TFLOPS for MFU denominator.
+# Triton kernels (gated conv, fused_mem_read) always run fp32 via custom_fwd cast,
+# so the dominant compute path is fp32 regardless of autocast precision.
+# bf16 tensor cores only benefit nn.Linear layers, which are a smaller fraction.
+# fp8 entry reflects a hypothetical future CUTLASS/scaled_mm path.
 H100_PEAK_TFLOPS: dict[str, float] = {
     "fp32": 67.0,
-    "bf16": 989.0,
+    "bf16": 67.0,
     "fp8": 1979.0,
 }
 
@@ -58,7 +62,6 @@ CONFIGS = [
     (32, 512),
     (64, 512),
     (32, 1024),
-    (64, 1024),
 ]
 
 
@@ -81,9 +84,14 @@ def non_embedding_params(model: GDNet) -> int:
 def estimate_flops(model: GDNet, B: int, T: int, use_cam: bool) -> float:
     N = non_embedding_params(model)
     tokens = B * T
-    # 1 fwd + 2 bwd \approx 5x fwd; fwd ≈ 2*N*tokens
-    step_flops = 5 * 2 * N * tokens
-    cam_flops = N_WRITE * 2 * N * tokens if use_cam and model.cam_enabled else 0
+    # Layers are weight-shared across cycles, so each param is used n_cycles times per fwd.
+    # 1 fwd + 2 bwd ≈ 5x fwd; fwd ≈ 2*N*n_cycles*tokens
+    step_flops = 5 * 2 * N * model.n_cycles * tokens  # type: ignore
+    cam_flops = (
+        N_WRITE * 2 * N * model.n_cycles * tokens
+        if use_cam and model.cam_enabled
+        else 0
+    )  # type: ignore
     return step_flops + cam_flops
 
 
