@@ -58,11 +58,9 @@ def projected_step(
     Returns:
         Task loss value for this step.
     """
-    device = tokens.device
-
     optimizer.zero_grad()
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):  # type: ignore
-        logits, _, _, _, gate_vals, _ = model(tokens, return_gates=True)
+        logits, _, _, _, gate_vals, _, _ = model(tokens, return_gates=True)
         loss_task = F.cross_entropy(logits.view(-1, logits.shape[-1]), targets.view(-1))
     if scaler:
         scaler.scale(loss_task).backward()
@@ -75,17 +73,16 @@ def projected_step(
 
     optimizer.zero_grad()
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):  # type: ignore
-        logits, _, _, _, gate_vals, _ = model(tokens, return_gates=True)
+        logits, side, _, _, gate_vals, _, _ = model(tokens, return_gates=True)
         loss_info = gate_info_loss_from_vals(gate_vals, model.n_layers)  # type: ignore
 
         if model.cam_enabled:
-            side_rand = torch.randn(tokens.shape[0], model.d, device=device)  # type: ignore
-            loss_info = loss_info + 0.1 * model.cam.recon_loss(side_rand)  # type: ignore
+            loss_info = loss_info + 0.1 * model.cam.recon_loss(side[0].mean(dim=1))  # type: ignore
 
         if model.trans_enabled and tokens.shape[1] >= 2:
             mid = tokens.shape[1] // 2
-            _, side1, _, _, _, _ = model(tokens[:, :mid])
-            _, side2, _, _, _, _ = model(tokens[:, mid:])
+            _, side1, _, _, _, _, _ = model(tokens[:, :mid])
+            _, side2, _, _, _, _, _ = model(tokens[:, mid:])
             z_t = side1[0].mean(dim=1)
             z_t1 = side2[0].mean(dim=1).detach()
             loss_info = loss_info + 0.1 * model.trans_ops.loss(z_t, z_t1)  # type: ignore
@@ -119,5 +116,4 @@ def projected_step(
     else:
         optimizer.step()
 
-    model.cam.invalidate_cache()  # type: ignore
     return loss_task.item()

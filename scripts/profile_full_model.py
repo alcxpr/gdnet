@@ -37,7 +37,7 @@ tokens = torch.randint(0, vocab_size, (B, T), device="cuda")  # type: ignore
 def step(model, i):
     ctx = freeze_sn_iteration(model) if i % 50 != 0 else nullcontext()
     with ctx:
-        logits, side, _, _, _, _ = model(tokens)
+        logits, side, _, _, _, _, _ = model(tokens)
         logits.sum().backward()
 
 
