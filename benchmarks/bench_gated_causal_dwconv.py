@@ -11,7 +11,9 @@ import triton
 from gdnet.kernel.gated_causal_depthwise_conv import gated_causal_depthwise_conv
 from gdnet.kernel.gated_causal_depthwise_conv.conv import (
     causal_dwconv_bwd,
+    causal_dwconv_bwd_sp,
     causal_dwconv_fwd,
+    causal_dwconv_fwd_sp,
 )
 from gdnet.kernel.gated_causal_depthwise_conv.gate_norm import (
     gate_stream_update_fwd,
@@ -82,6 +84,7 @@ def _register(runner, B, T, d, k):
     BLOCK_D = d
 
     x_dt = x.float().permute(0, 2, 1).contiguous()
+    halo_dt = torch.randn(B, d, k - 1, device="cuda")
     conv_out_dt = causal_dwconv_fwd(x_dt, W_conv, T, k, BLOCK_T)  # type: ignore
     conv_flat = conv_out_dt.permute(0, 2, 1).contiguous().view(n_rows, d)
     side_flat = side.contiguous().view(n_rows, d)
@@ -94,6 +97,20 @@ def _register(runner, B, T, d, k):
     d_h_norm = torch.randn(n_rows, d, device="cuda")
     d_conv_dt = torch.randn(B, d, T, device="cuda")
 
+    runner.bench_time_func(
+        f"fwd_causal_dwconv_{tag}",
+        lambda loops: _time(
+            loops,
+            lambda: causal_dwconv_fwd(x_dt, W_conv, T, k, BLOCK_T),  # type: ignore
+        ),
+    )
+    runner.bench_time_func(
+        f"fwd_causal_dwconv_sp_{tag}",
+        lambda loops: _time(
+            loops,
+            lambda: causal_dwconv_fwd_sp(x_dt, halo_dt, W_conv, T, k, BLOCK_T),  # type: ignore
+        ),
+    )
     runner.bench_time_func(
         f"fwd_gate_update_{tag}",
         lambda loops: _time(
@@ -123,6 +140,21 @@ def _register(runner, B, T, d, k):
         lambda loops: _time(
             loops,
             lambda: causal_dwconv_bwd(d_conv_dt, x_dt, W_conv, T, k, BLOCK_T),  # type: ignore
+        ),
+    )
+    runner.bench_time_func(
+        f"bwd_causal_dwconv_sp_{tag}",
+        lambda loops: _time(
+            loops,
+            lambda: causal_dwconv_bwd_sp(
+                d_conv_dt,
+                x_dt,
+                halo_dt,
+                W_conv,
+                T,
+                k,
+                BLOCK_T,  # type: ignore
+            ),
         ),
     )
     runner.bench_time_func(
