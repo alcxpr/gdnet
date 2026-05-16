@@ -1,12 +1,4 @@
-"""Training throughput: tokens/sec, MFU, and step time across batch/sequence configs.
-
-MFU (Model FLOP Utilization) is estimated as:
-    flops_per_step / (step_time_s * peak_flops)
-
-where flops_per_step = (1 fwd + 2 bwd) * 2*N_params*B*T
-                     + N_WRITE * 2*N_params*B*T  (cam buffer writes, fwd only)
-
-Peak FLOPS used: H100 non-sparse tensor core throughput.
+"""Training throughput: tok/s and step time across batch/sequence configs.
 
 Usage:
     uv run python scripts/throughput.py
@@ -38,17 +30,6 @@ from gdnet.utils.fp8 import Precision
 VOCAB_SIZE = 1024
 N_WRITE = 4
 
-# Effective peak TFLOPS for MFU denominator (H100 SXM, non-sparse).
-# set_float32_matmul_precision("high") enables TF32 tensor cores for nn.Linear,
-# which hits 989 TFLOPS same as bf16. Triton kernels (gated conv, fused_mem_read)
-# run true fp32 via custom_fwd and don't benefit from TF32, but matmuls dominate FLOPs.
-# fp8 reflects a hypothetical future CUTLASS / torch._scaled_mm path.
-H100_PEAK_TFLOPS: dict[str, float] = {
-    "fp32": 989.0,
-    "bf16": 989.0,
-    "fp8": 1979.0,
-}
-
 CONFIGS = [
     # (B, T)
     (1, 128),
@@ -61,7 +42,7 @@ CONFIGS = [
     (16, 512),
     (32, 512),
     (64, 512),
-    (32, 1024),  # BEST
+    (32, 1024),
 ]
 
 
@@ -76,23 +57,10 @@ def make_model(T: int) -> GDNet:
     ).cuda()
 
 
-def non_embedding_params(model: GDNet) -> int:
-    embed_params = sum(p.numel() for p in model.embed.parameters())
-    return sum(p.numel() for p in model.parameters()) - embed_params
-
-
-def estimate_flops(model: GDNet, B: int, T: int, use_cam: bool) -> float:
-    N = non_embedding_params(model)
-    tokens = B * T
-    # Layers are weight-shared across cycles, so each param is used n_cycles times per fwd.
-    # 1 fwd + 2 bwd ≈ 5x fwd; fwd ≈ 2*N*n_cycles*tokens
-    step_flops = 5 * 2 * N * model.n_cycles * tokens  # type: ignore
-    cam_flops = (
-        N_WRITE * 2 * N * model.n_cycles * tokens
-        if use_cam and model.cam_enabled
-        else 0
-    )  # type: ignore
-    return step_flops + cam_flops
+def param_counts(model: GDNet) -> tuple[int, int]:
+    total = sum(p.numel() for p in model.parameters())
+    embed = sum(p.numel() for p in model.embed.parameters())
+    return total, total - embed
 
 
 def run_config(
@@ -103,19 +71,16 @@ def run_config(
     compile_model: bool,
     n_warmup: int = 5,
     n_steps: int = 30,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, int, int]:
     model = make_model(T)
+    total_params, non_embed_params = param_counts(model)
+
     if compile_model:
-        torch._functorch.config.donated_buffer = (
-            False  # incompatible with retain_graph=True
-        )
+        torch._functorch.config.donated_buffer = False  # incompatible with retain_graph=True
         model = torch.compile(model)  # type: ignore
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)  # type: ignore
     params = list(model.parameters())  # type: ignore
-
-    flops = estimate_flops(model, B, T, use_cam)  # type: ignore
-    peak = H100_PEAK_TFLOPS[precision] * 1e12
 
     tokens = torch.randint(0, VOCAB_SIZE, (B, T), device="cuda")  # type: ignore
     targets = torch.randint(0, VOCAB_SIZE, (B, T), device="cuda")  # type: ignore
@@ -156,22 +121,27 @@ def run_config(
 
     ms_per_step = (time.perf_counter() - t0) / n_steps * 1000
     tokens_per_sec = B * T / (ms_per_step / 1000)
-    mfu = flops / (ms_per_step / 1000 * peak) * 100
 
     del model
     torch.cuda.empty_cache()
-    return ms_per_step, tokens_per_sec, mfu
+    return ms_per_step, tokens_per_sec, total_params, non_embed_params
 
 
 def print_table(
-    results: list[tuple[int, int, float, float, float]],
+    results: list[tuple[int, int, float, float, int, int]],
     cam_label: str,
 ) -> None:
     print(f"\ncam={cam_label}")
-    print(f"{'B':>4}  {'T':>4}  {'ms/step':>10}  {'tok/s':>12}  {'MFU':>7}")
-    print("-" * 48)
-    for B, T, ms, tps, mfu in results:
-        print(f"{B:>4}  {T:>4}  {ms:>10.2f}  {tps:>12,.0f}  {mfu:>6.2f}%")
+    print(f"{'B':>4}  {'T':>4}  {'ms/step':>10}  {'tok/s':>12}  {'total params':>14}  {'non-embed':>12}")
+    print("-" * 68)
+    for B, T, ms, tps, total, non_embed in results:
+        if ms != ms:  # nan
+            print(f"{B:>4}  {T:>4}  {'OOM':>10}")
+        else:
+            print(
+                f"{B:>4}  {T:>4}  {ms:>10.2f}  {tps:>12,.0f}"
+                f"  {total/1e6:>11.2f}M  {non_embed/1e6:>9.2f}M"
+            )
 
 
 def main() -> None:
@@ -187,7 +157,7 @@ def main() -> None:
         try:
             import transformer_engine  # type: ignore  # noqa: F401
         except ImportError:
-            print("TransformerEngine not found - cannot run fp8")
+            print("TransformerEngine not found — cannot run fp8")
             return
 
     compile_flag = args.compile
@@ -200,12 +170,11 @@ def main() -> None:
         results = []
         for B, T in CONFIGS:
             try:
-                ms, tps, mfu = run_config(B, T, precision, use_cam, compile_flag)
-                results.append((B, T, ms, tps, mfu))
+                ms, tps, total, non_embed = run_config(B, T, precision, use_cam, compile_flag)
+                results.append((B, T, ms, tps, total, non_embed))
             except torch.cuda.OutOfMemoryError:
-                results.append((B, T, float("nan"), float("nan"), float("nan")))
+                results.append((B, T, float("nan"), float("nan"), 0, 0))
                 torch.cuda.empty_cache()
-                print(f"  B={B} T={T}: OOM")
         print_table(results, "on" if use_cam else "off")
 
 

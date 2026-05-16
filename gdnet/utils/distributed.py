@@ -86,7 +86,7 @@ def _detect_layer_cls(model: nn.Module) -> Optional[Type[nn.Module]]:
 
 def wrap_fsdp(
     model: nn.Module,
-    sharding_strategy: ShardingStrategy = ShardingStrategy.FULL_SHARD,
+    sharding_strategy: ShardingStrategy = ShardingStrategy.SHARD_GRAD_OP,
     offload: bool = False,
     min_num_params: int = 1_000_000,
 ) -> FSDP:
