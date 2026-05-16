@@ -18,7 +18,7 @@ from gdnet.kernel.gated_causal_depthwise_conv.gate_norm import (
 DEVICE = "cuda"
 
 
-def _reference_fwd(x, fwd, side, R, W_conv, W1, b1, W_norm, W2, b2, eps=1e-6):
+def _reference_fwd(x, side, R, W_conv, W1, b1, W_norm, W2, b2, eps=1e-6):
     B, T, d = x.shape
     k = W_conv.shape[1]
     x_t = x.float().transpose(1, 2)
@@ -38,22 +38,21 @@ def _reference_fwd(x, fwd, side, R, W_conv, W1, b1, W_norm, W2, b2, eps=1e-6):
 def _make(B=2, T=16, d=128, k=4, seed=0):
     torch.manual_seed(seed)
     return (
-        torch.randn(B, T, d, dtype=torch.bfloat16, device=DEVICE),  # type: ignore
-        torch.randn(B, T, d, dtype=torch.bfloat16, device=DEVICE),  # type: ignore
-        torch.randn(B, T, d, dtype=torch.bfloat16, device=DEVICE),  # type: ignore
-        F.sigmoid(torch.randn(B, T, d, device=DEVICE)).bfloat16(),
-        torch.randn(d, k, device=DEVICE),
-        torch.randn(d, d, device=DEVICE) * 0.1,
-        torch.zeros(d, device=DEVICE),  # type: ignore
-        torch.ones(d, device=DEVICE),  # type: ignore
-        torch.randn(d, d, device=DEVICE) * 0.1,
-        torch.zeros(d, device=DEVICE),  # type: ignore
+        torch.randn(B, T, d, dtype=torch.bfloat16, device=DEVICE),  # type: ignore  # x
+        torch.randn(B, T, d, dtype=torch.bfloat16, device=DEVICE),  # type: ignore  # side
+        F.sigmoid(torch.randn(B, T, d, device=DEVICE)).bfloat16(),               # R
+        torch.randn(d, k, device=DEVICE),                                          # W_conv
+        torch.randn(d, d, device=DEVICE) * 0.1,                                   # W1
+        torch.zeros(d, device=DEVICE),  # type: ignore                            # b1
+        torch.ones(d, device=DEVICE),  # type: ignore                             # W_norm
+        torch.randn(d, d, device=DEVICE) * 0.1,                                   # W2
+        torch.zeros(d, device=DEVICE),  # type: ignore                            # b2
     )
 
 
 @pytest.mark.parametrize("B,T,d,k", [(2, 16, 128, 4), (2, 32, 256, 7)])
 def test_causal_dwconv_fwd(B, T, d, k):
-    x, _, _, _, W_conv, *_ = _make(B, T, d, k)
+    x, _, _, W_conv, *_ = _make(B, T, d, k)
     x_dt = x.float().permute(0, 2, 1).contiguous()
     BLOCK_T = min(triton.next_power_of_2(T), 64)
 
@@ -71,7 +70,7 @@ def test_causal_dwconv_fwd(B, T, d, k):
 def test_causal_dwconv_fwd_sp(B, T, d, k):
     # Reference: causal conv over [halo | x], output the last T positions.
     # causal_dwconv_fwd_sp should match this without materialising the cat.
-    x, _, _, _, W_conv, *_ = _make(B, T, d, k)
+    x, _, _, W_conv, *_ = _make(B, T, d, k)
     x_dt = x.float().permute(0, 2, 1).contiguous()  # (B, d, T)
     halo_dt = torch.randn(B, d, k - 1, device=DEVICE)
     BLOCK_T = min(triton.next_power_of_2(T), 64)
@@ -89,7 +88,7 @@ def test_causal_dwconv_fwd_sp(B, T, d, k):
 
 @pytest.mark.parametrize("B,T,d,k", [(2, 16, 128, 4), (2, 32, 256, 7)])
 def test_causal_dwconv_bwd(B, T, d, k):
-    x, _, _, _, W_conv, *_ = _make(B, T, d, k)
+    x, _, _, W_conv, *_ = _make(B, T, d, k)
     x_dt = x.float().permute(0, 2, 1).contiguous()
     BLOCK_T = min(triton.next_power_of_2(T), 64)
 
@@ -109,7 +108,7 @@ def test_causal_dwconv_bwd(B, T, d, k):
 def test_causal_dwconv_bwd_sp(B, T, d, k):
     # Gradient correctness: bwd_sp(dX, x, halo) must match slicing the gradient
     # of the padded causal conv w.r.t. x and halo separately.
-    x, _, _, _, W_conv, *_ = _make(B, T, d, k)
+    x, _, _, W_conv, *_ = _make(B, T, d, k)
     x_dt = x.float().permute(0, 2, 1).contiguous()
     halo_dt = torch.randn(B, d, k - 1, device=DEVICE)
     BLOCK_T = min(triton.next_power_of_2(T), 64)
@@ -184,7 +183,7 @@ def test_fwd(B, T, d, k):
 @pytest.mark.parametrize("B,T,d,k", [(2, 16, 128, 4), (4, 32, 256, 7)])
 def test_bwd(B, T, d, k):
     args = _make(B, T, d, k)
-    x, fwd, side, R, W_conv, W1, b1, W_norm, W2, b2 = args
+    x, side, R, W_conv, W1, b1, W_norm, W2, b2 = args
 
     def _grads(fn):
         params = [
@@ -193,7 +192,6 @@ def test_bwd(B, T, d, k):
         ]
         o1, o2 = fn(
             params[0].bfloat16(),
-            fwd,
             params[1].bfloat16(),
             params[2].bfloat16(),
             *params[3:],

@@ -197,7 +197,9 @@ def causal_dwconv_fwd(
         x_dt.stride(0),
         x_dt.stride(2),
         x_dt.stride(1),
-        0, 0, 0,  # dummy halo strides
+        0,
+        0,
+        0,  # dummy halo strides
         out.stride(0),
         out.stride(2),
         out.stride(1),
@@ -268,7 +270,7 @@ def causal_dwconv_bwd(
     _causal_dwconv_bwd_kernel[(B, d)](
         d_conv_dt,
         x_dt,
-        x_dt,   # dummy HALO_ptr
+        x_dt,  # dummy HALO_ptr
         W_conv,
         dX_dt,
         dX_dt,  # dummy dHALO_ptr, never written when USE_HALO=False
@@ -278,12 +280,60 @@ def causal_dwconv_bwd(
         d_conv_dt.stride(0),
         d_conv_dt.stride(2),
         d_conv_dt.stride(1),
-        0, 0, 0,  # dummy halo strides
+        0,
+        0,
+        0,  # dummy halo strides
         BLOCK_T=BLOCK_T,  # type: ignore
         MAX_K=MAX_K,  # type: ignore
         USE_HALO=False,  # type: ignore
     )
     return dX_dt, dW_conv
+
+
+class CausalDWConvFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx, x_dt: torch.Tensor, W_conv: torch.Tensor, T: int, k: int, BLOCK_T: int
+    ) -> torch.Tensor:
+        out = causal_dwconv_fwd(x_dt, W_conv, T, k, BLOCK_T)
+        ctx.save_for_backward(x_dt, W_conv)
+        ctx.T, ctx.k, ctx.BLOCK_T = T, k, BLOCK_T
+        return out
+
+    @staticmethod
+    def backward(ctx, d_conv_dt: torch.Tensor) -> tuple:  # type: ignore
+        x_dt, W_conv = ctx.saved_tensors
+        dX_dt, dW_conv = causal_dwconv_bwd(
+            d_conv_dt.contiguous(), x_dt, W_conv, ctx.T, ctx.k, ctx.BLOCK_T
+        )
+        return dX_dt, dW_conv, None, None, None
+
+
+class CausalDWConvFunctionSP(torch.autograd.Function):
+    """SP variant: takes halo from left neighbour rank, propagates grad back via backward."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        x_dt: torch.Tensor,
+        halo_dt: torch.Tensor,
+        W_conv: torch.Tensor,
+        T: int,
+        k: int,
+        BLOCK_T: int,
+    ) -> torch.Tensor:
+        out = causal_dwconv_fwd_sp(x_dt, halo_dt, W_conv, T, k, BLOCK_T)
+        ctx.save_for_backward(x_dt, halo_dt, W_conv)
+        ctx.T, ctx.k, ctx.BLOCK_T = T, k, BLOCK_T
+        return out
+
+    @staticmethod
+    def backward(ctx, d_conv_dt: torch.Tensor) -> tuple:  # type: ignore
+        x_dt, halo_dt, W_conv = ctx.saved_tensors
+        dX_dt, dHalo_dt, dW_conv = causal_dwconv_bwd_sp(
+            d_conv_dt.contiguous(), x_dt, halo_dt, W_conv, ctx.T, ctx.k, ctx.BLOCK_T
+        )
+        return dX_dt, dHalo_dt, dW_conv, None, None, None
 
 
 def causal_dwconv_bwd_sp(
