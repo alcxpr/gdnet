@@ -184,14 +184,14 @@ def gate_stream_update_fwd(
 # so the compiler always emits ld.global.v4.b32. BLOCK_D must divide d - configs are
 # tried largest-first and the first that evenly divides d wins. Tune this table for
 # your hardware; do not add configs that violate the sizePerThread==4 invariant.
-_BWD_ELEM_CONFIGS: list[tuple[int, int]] = [(512, 4), (256, 2), (128, 1)]
+_BWD_ELEM_CONFIGS: list[tuple[int, int]] = [(512, 4), (256, 2), (128, 1), (64, 1), (32, 1)]
 
 
 def _bwd_elem_tile(d: int) -> tuple[int, int]:
     for block_d, nw in _BWD_ELEM_CONFIGS:
         if d % block_d == 0:
             return block_d, nw
-    return 128, 1
+    return 32, 1
 
 
 def gate_w2_bwd(
