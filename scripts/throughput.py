@@ -27,7 +27,7 @@ from gdnet.loss import projected_step
 from gdnet.model import GDNet
 from gdnet.utils.fp8 import Precision
 
-VOCAB_SIZE = 1024
+VOCAB_SIZE = 3200
 N_WRITE = 4
 
 CONFIGS = [
@@ -49,8 +49,8 @@ CONFIGS = [
 def make_model(T: int) -> GDNet:
     return GDNet(
         vocab_size=VOCAB_SIZE,
-        d_embed=128,
-        d=1024,
+        d_embed=1024,
+        d=2048,
         n_layers=8,
         n_cycles=2,
         chunk_size=T,
@@ -76,7 +76,9 @@ def run_config(
     total_params, non_embed_params = param_counts(model)
 
     if compile_model:
-        torch._functorch.config.donated_buffer = False  # incompatible with retain_graph=True
+        torch._functorch.config.donated_buffer = (
+            False  # incompatible with retain_graph=True
+        )
         model = torch.compile(model)  # type: ignore
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)  # type: ignore
@@ -132,7 +134,9 @@ def print_table(
     cam_label: str,
 ) -> None:
     print(f"\ncam={cam_label}")
-    print(f"{'B':>4}  {'T':>4}  {'ms/step':>10}  {'tok/s':>12}  {'total params':>14}  {'non-embed':>12}")
+    print(
+        f"{'B':>4}  {'T':>4}  {'ms/step':>10}  {'tok/s':>12}  {'total params':>14}  {'non-embed':>12}"
+    )
     print("-" * 68)
     for B, T, ms, tps, total, non_embed in results:
         if ms != ms:  # nan
@@ -140,7 +144,7 @@ def print_table(
         else:
             print(
                 f"{B:>4}  {T:>4}  {ms:>10.2f}  {tps:>12,.0f}"
-                f"  {total/1e6:>11.2f}M  {non_embed/1e6:>9.2f}M"
+                f"  {total / 1e6:>11.2f}M  {non_embed / 1e6:>9.2f}M"
             )
 
 
@@ -170,7 +174,9 @@ def main() -> None:
         results = []
         for B, T in CONFIGS:
             try:
-                ms, tps, total, non_embed = run_config(B, T, precision, use_cam, compile_flag)
+                ms, tps, total, non_embed = run_config(
+                    B, T, precision, use_cam, compile_flag
+                )
                 results.append((B, T, ms, tps, total, non_embed))
             except torch.cuda.OutOfMemoryError:
                 results.append((B, T, float("nan"), float("nan"), 0, 0))
