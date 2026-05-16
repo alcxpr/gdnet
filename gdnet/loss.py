@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -138,8 +139,12 @@ def projected_step(
 
     flat_task = torch.cat([g.flatten() for g in g_task])  # type: ignore
     flat_info = torch.cat([g.flatten() for g in g_info])  # type: ignore
-    denom = flat_task.dot(flat_task).clamp(min=1e-8)
-    proj_coef = flat_info.dot(flat_task) / denom
+    denom = flat_task.dot(flat_task)
+    proj_coef_num = flat_info.dot(flat_task)
+    if dist.is_initialized():
+        dist.all_reduce(denom)
+        dist.all_reduce(proj_coef_num)
+    proj_coef = proj_coef_num / denom.clamp(min=1e-8)
     flat_perp = flat_info - proj_coef * flat_task
 
     optimizer.zero_grad()
