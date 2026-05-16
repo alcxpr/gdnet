@@ -24,15 +24,16 @@ class ContentCAM(nn.Module):
 
     def write(
         self,
-        side_mean: torch.Tensor,
+        tag_input: torch.Tensor,
+        val_input: torch.Tensor,
         buffer_tags: torch.Tensor,
         buffer_vals: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        tag = self.W_tag(side_mean)
-        val = self.W_c(side_mean)
+        tag = self.W_tag(tag_input)
+        val = self.W_c(val_input)
         buffer_tags = torch.roll(buffer_tags, 1, dims=1)  # type: ignore
         buffer_vals = torch.roll(buffer_vals, 1, dims=1)  # type: ignore
-        buffer_tags[:, 0, :] = tag.detach()
+        buffer_tags[:, 0, :] = tag
         buffer_vals[:, 0, :] = val.detach()
         return buffer_tags, buffer_vals
 
@@ -88,15 +89,16 @@ class PosGateCAM(nn.Module):
 
     def write(
         self,
-        side_mean: torch.Tensor,
+        tag_input: torch.Tensor,
+        val_input: torch.Tensor,
         buffer_tags: torch.Tensor,
         buffer_vals: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        tag = self.W_tag(side_mean)
-        val = self.W_c(side_mean)
+        tag = self.W_tag(tag_input)
+        val = self.W_c(val_input)
         buffer_tags = torch.roll(buffer_tags, 1, dims=1)  # type: ignore
         buffer_vals = torch.roll(buffer_vals, 1, dims=1)  # type: ignore
-        buffer_tags[:, 0, :] = tag.detach()
+        buffer_tags[:, 0, :] = tag
         buffer_vals[:, 0, :] = val.detach()
         return buffer_tags, buffer_vals
 

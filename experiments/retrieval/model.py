@@ -90,7 +90,7 @@ class RetrievalModel(nn.Module):
             x = self.embed(chunks[:, i, :])
             fwd, side = self.encoder(x)
             buffer_tags, buffer_vals = self.cam.write(
-                side[0].mean(dim=1), buffer_tags, buffer_vals
+                fwd[:, -1, :], side[0].mean(dim=1), buffer_tags, buffer_vals
             )
 
         x = self.embed(chunks[:, -1, :])

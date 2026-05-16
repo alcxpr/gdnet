@@ -43,12 +43,12 @@ LR = 1e-3
 
 N_SLOTS = 8
 CHUNK_SIZE = 16
-D = 64
-D_SIG = 16
-D_C = 16
-N_LAYERS = 2
+D = 32
+D_SIG = 8
+D_C = 8
+N_LAYERS = 1
 KERNEL_SIZE = 7
-N_CYCLES = 2
+N_CYCLES = 2  # RF = n_cycles * kernel_size * n_layers = 14, covers chunk_size=16
 AMBIGUOUS_K = 2  # noise chunks between old and new signal in C2
 
 
