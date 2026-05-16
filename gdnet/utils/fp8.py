@@ -24,8 +24,8 @@ def autocast(precision: Precision = "fp32", amax_history_len: int = 16):
         return nullcontext()
     if precision == "bf16":
         return torch.autocast("cuda", dtype=torch.bfloat16)  # type: ignore
-    from transformer_engine.common.recipe import DelayedScaling, Format
-    from transformer_engine.pytorch import fp8_autocast
+    from transformer_engine.common.recipe import DelayedScaling, Format  # type: ignore
+    from transformer_engine.pytorch import fp8_autocast  # type: ignore
 
     recipe = DelayedScaling(
         fp8_format=Format.HYBRID,  # type: ignore
