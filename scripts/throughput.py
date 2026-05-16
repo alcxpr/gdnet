@@ -38,14 +38,14 @@ from gdnet.utils.fp8 import Precision
 VOCAB_SIZE = 1024
 N_WRITE = 4
 
-# Effective peak TFLOPS for MFU denominator.
-# Triton kernels (gated conv, fused_mem_read) always run fp32 via custom_fwd cast,
-# so the dominant compute path is fp32 regardless of autocast precision.
-# bf16 tensor cores only benefit nn.Linear layers, which are a smaller fraction.
-# fp8 entry reflects a hypothetical future CUTLASS/scaled_mm path.
+# Effective peak TFLOPS for MFU denominator (H100 SXM, non-sparse).
+# set_float32_matmul_precision("high") enables TF32 tensor cores for nn.Linear,
+# which hits 989 TFLOPS same as bf16. Triton kernels (gated conv, fused_mem_read)
+# run true fp32 via custom_fwd and don't benefit from TF32, but matmuls dominate FLOPs.
+# fp8 reflects a hypothetical future CUTLASS / torch._scaled_mm path.
 H100_PEAK_TFLOPS: dict[str, float] = {
-    "fp32": 67.0,
-    "bf16": 67.0,
+    "fp32": 989.0,
+    "bf16": 989.0,
     "fp8": 1979.0,
 }
 
