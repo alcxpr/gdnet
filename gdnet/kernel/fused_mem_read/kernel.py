@@ -199,16 +199,15 @@ def fused_mem_read_fwd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
-        q: (B, d_sig) float32 contiguous -- d_sig must be a power of 2
-        gamma: (B, d_sig) float32 contiguous
-        e: (n_slots, d_sig) float32 contiguous
-        buffer_tags: (B, n_slots, d_sig) float32 contiguous
-        buffer_vals: (B, n_slots, d_c) float32 contiguous -- d_c must be a power of 2
-        alpha: scalar
+        q: Content query `(B, d_sig)` float32 contiguous, d_sig must be a power of 2.
+        gamma: Position query `(B, d_sig)` float32 contiguous.
+        e: Slot embeddings `(n_slots, d_sig)` float32 contiguous.
+        buffer_tags: Stored content tags `(B, n_slots, d_sig)` float32 contiguous.
+        buffer_vals: Stored compressed values `(B, n_slots, d_c)` float32 contiguous, d_c must be a power of 2.
+        alpha: Scalar weight for the position term.
 
     Returns:
-        retrieved_c: (B, d_c) float32
-        w: (B, n_slots) float32
+        retrieved_c `(B, d_c)` float32 and w `(B, n_slots)` float32.
     """
     B, d_sig = q.shape
     n_slots = e.shape[0]
@@ -253,22 +252,20 @@ def fused_mem_read_bwd(
 ]:
     """
     Args:
-        d_retrieved_c: (B, d_c) float32 contiguous
-        q: (B, d_sig) float32 contiguous
-        gamma: (B, d_sig) float32 contiguous
-        e: (n_slots, d_sig) float32 contiguous
-        buffer_tags: (B, n_slots, d_sig) float32 contiguous
-        buffer_vals: (B, n_slots, d_c) float32 contiguous
-        w: (B, n_slots) float32 contiguous
-        alpha: scalar
+        d_retrieved_c: Upstream gradient `(B, d_c)` float32 contiguous.
+        q: Content query `(B, d_sig)` float32 contiguous.
+        gamma: Position query `(B, d_sig)` float32 contiguous.
+        e: Slot embeddings `(n_slots, d_sig)` float32 contiguous.
+        buffer_tags: Stored content tags `(B, n_slots, d_sig)` float32 contiguous.
+        buffer_vals: Stored compressed values `(B, n_slots, d_c)` float32 contiguous.
+        w: Retrieval weights from forward `(B, n_slots)` float32 contiguous.
+        alpha: Scalar weight for the position term.
 
     Returns:
-        d_q: (B, d_sig) float32
-        d_gamma: (B, d_sig) float32
-        d_alpha_per_b: (B,) float32 -- sum in Python to get scalar d_alpha
-        d_sim: (B, n_slots) float32 -- caller computes d_e = alpha * d_sim.T @ gamma
-        d_buffer_tags: (B, n_slots, d_sig) float32
-        d_buffer_vals: (B, n_slots, d_c) float32
+        d_q `(B, d_sig)`, d_gamma `(B, d_sig)`, d_alpha_per_b `(B,)` (sum in Python
+        for scalar d_alpha), d_sim `(B, n_slots)` (caller computes
+        d_e = alpha * d_sim.T @ gamma), d_buffer_tags `(B, n_slots, d_sig)`,
+        d_buffer_vals `(B, n_slots, d_c)`.
     """
     B, d_sig = q.shape
     n_slots = w.shape[1]

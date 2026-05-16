@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 
 from .layer import GDLayer
 from .memory import Memory as CAM
@@ -102,6 +101,7 @@ class GDNet(nn.Module):
         torch.Tensor,
         list[torch.Tensor],
         torch.Tensor | None,
+        torch.Tensor,
     ]:
         """Forward pass.
 
@@ -120,7 +120,8 @@ class GDNet(nn.Module):
             - buffer_tags `(B, n_slots, d_sig)`
             - buffer_vals `(B, n_slots, d_c)`
             - gate_vals: list of gate tensors, empty if `return_gates=False`
-            - cam_weights: ReLA retrieval weights `(B, n_slots)` or `None`
+            - cam_weights: retrieval weights `(B, n_slots)` or `None`
+            - fwd_last: last-token hidden state before CAM read `(B, d)`, for write_cam
         """
         B, T = tokens.shape
         fwd = self.proj_in(self.embed(tokens))
@@ -150,24 +151,27 @@ class GDNet(nn.Module):
             else:
                 fwd, side = self.one_cycle(fwd, side)
 
+        fwd_last = fwd[:, -1, :]
         cam_weights: torch.Tensor | None = None
         if self.cam_enabled:
             fwd, cam_weights = self.cam.read(fwd, side[0], buffer_tags, buffer_vals)
 
         logits = self.head(self.proj_out(self.norm_out(fwd)))
-        return logits, side, buffer_tags, buffer_vals, gate_vals, cam_weights
+        return logits, side, buffer_tags, buffer_vals, gate_vals, cam_weights, fwd_last
 
     def write_cam(
         self,
+        fwd_last: torch.Tensor,
         side: list[torch.Tensor],
         buffer_tags: torch.Tensor,
         buffer_vals: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Write the current side stream summary to the CAM buffer.
+        """Write the current chunk summary to the CAM buffer.
 
         No-op if `cam_enabled` is `False`.
 
         Args:
+            fwd_last: Last-token hidden state `(B, d)`
             side: Per-layer side streams.
             buffer_tags: Current tag buffer `(B, n_slots, d_sig)`.
             buffer_vals: Current value buffer `(B, n_slots, d_c)`.
@@ -177,34 +181,9 @@ class GDNet(nn.Module):
         """
         if self.cam_enabled:
             buffer_tags, buffer_vals = self.cam.write(
-                side[0].mean(dim=1), buffer_tags, buffer_vals
+                fwd_last, side[0].mean(dim=1), buffer_tags, buffer_vals
             )
         return buffer_tags, buffer_vals
-
-    @torch.no_grad()
-    def collect_side_samples(
-        self,
-        loader: DataLoader,
-        n_batches: int = 50,
-    ) -> torch.Tensor:
-        """Collect side stream means for CAM PCA initialization.
-
-        Args:
-            loader: DataLoader yielding `(tokens, targets)` batches.
-            n_batches: Number of batches to collect.
-
-        Returns:
-            `(N, d)` tensor of side stream mean vectors.
-        """
-        self.eval()
-        device = next(self.parameters()).device
-        samples = []
-        for i, (x, _) in enumerate(loader):
-            if i >= n_batches:
-                break
-            _, side, _, _, _, _ = self.forward(x.to(device))
-            samples.append(side[0].mean(dim=1).cpu())
-        return torch.cat(samples, dim=0)  # type: ignore
 
     @torch.no_grad()
     def generate(
@@ -235,12 +214,12 @@ class GDNet(nn.Module):
 
         for step in range(max_new_tokens):
             ctx = ids[:, -self.chunk_size :]
-            logits, side, buffer_tags, buffer_vals, _, _ = self.forward(
+            logits, side, buffer_tags, buffer_vals, _, _, fwd_last = self.forward(
                 ctx, buffer_tags, buffer_vals
             )
             if step % self.chunk_size == 0:
                 buffer_tags, buffer_vals = self.write_cam(
-                    side, buffer_tags, buffer_vals
+                    fwd_last, side, buffer_tags, buffer_vals
                 )
 
             logits_last = logits[:, -1, :] / temperature

@@ -79,15 +79,14 @@ def fused_mem_read(
     """Fused sim + softmax + retrieval aggregation for the CAM read operation.
 
     Args:
-        q: (B, d_sig) content query (W_tag output on current chunk)
-        gamma: (B, d_sig) position query (sigmoid(W_pos @ q))
-        e: (n_slots, d_sig) learned slot embeddings (W_slot output)
-        buffer_tags: (B, n_slots, d_sig) stored content tags
-        buffer_vals: (B, n_slots, d_c) stored compressed values
-        alpha: () learned log-scale scalar (exp(rho))
+        q: Content query `(B, d_sig)`.
+        gamma: Position query `(B, d_sig)`, sigmoid(W_pos(q)).
+        e: Learned slot embeddings `(n_slots, d_sig)`.
+        buffer_tags: Stored content tags `(B, n_slots, d_sig)`.
+        buffer_vals: Stored compressed values `(B, n_slots, d_c)`.
+        alpha: Learned log-scale scalar `()`, exp(rho).
 
     Returns:
-        retrieved_c: (B, d_c)
-        w: (B, n_slots) retrieval weights (for logging; no grad flows through)
+        retrieved_c `(B, d_c)` and w `(B, n_slots)` retrieval weights, no grad on w.
     """
     return FusedMemReadFunction.apply(q, gamma, e, buffer_tags, buffer_vals, alpha)

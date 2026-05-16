@@ -19,4 +19,5 @@ dev = [
     "pytest>=9.0.3",
     "pyperf>=2.10.0",
     "matplotlib>=3.10.9",
+    "modal>=1.4.2",
 ]
