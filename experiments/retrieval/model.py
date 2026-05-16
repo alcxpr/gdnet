@@ -87,7 +87,7 @@ class RetrievalModel(nn.Module):
         tag_inp = fwd_write[:, -1, :].reshape(B, n_write, -1).flip(dims=[1])
         val_inp = side_write[0].mean(dim=1).reshape(B, n_write, -1).flip(dims=[1])
         buffer_tags = self.cam.W_tag(tag_inp)
-        buffer_vals = self.cam.W_c(val_inp).detach()
+        buffer_vals = self.cam.W_c(val_inp)
 
         x = self.embed(chunks[:, -1, :])
         fwd, side = self.encoder(x)
