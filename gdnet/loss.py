@@ -4,6 +4,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .utils.fp8 import Precision
+from .utils.fp8 import autocast as make_autocast
+
 
 def gate_info_loss_from_vals(
     gate_vals: list[torch.Tensor],
@@ -25,6 +28,32 @@ def gate_info_loss_from_vals(
     return torch.stack([g.mean() for g in last_cycle]).prod()
 
 
+def build_cam_buffer(
+    model: nn.Module,
+    write_chunks: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Populate the CAM buffer by processing write chunks sequentially.
+
+    Must be called inside the same autocast context as the subsequent forward pass
+    so that gradients flow through W_tag, W_c, W_pos, and rho.
+
+    Args:
+        model: GDNet model with `cam_enabled`, `cam`, and `write_cam` attributes.
+        write_chunks: Write-chunk token ids `(B, n_write, T)`.
+
+    Returns:
+        `(buffer_tags, buffer_vals)` ready to pass into `model.forward`.
+    """
+    B, n_write, _ = write_chunks.shape
+    device = write_chunks.device
+    btags = torch.zeros(B, model.cam.n_slots, model.cam.d_sig, device=device)  # type: ignore
+    bvals = torch.zeros(B, model.cam.n_slots, model.cam.d_c, device=device)  # type: ignore
+    for i in range(n_write):
+        _, side, _, _, _, _, fwd_last = model(write_chunks[:, i], btags, bvals)
+        btags, bvals = model.write_cam(fwd_last, side, btags, bvals)  # type: ignore
+    return btags, bvals
+
+
 def projected_step(
     model: nn.Module,
     params: list[nn.Parameter],
@@ -33,6 +62,8 @@ def projected_step(
     targets: torch.Tensor,
     beta: float = 0.1,
     scaler: torch.cuda.amp.GradScaler | None = None,
+    precision: Precision = "bf16",
+    write_chunks: torch.Tensor | None = None,
 ) -> float:
     """Single training step with projected gradient optimization.
 
@@ -53,14 +84,25 @@ def projected_step(
         tokens: Input token ids `(B, T)`.
         targets: Target token ids `(B, T)`.
         beta: Scale factor for the projected info gradient.
-        scaler: Optional AMP grad scaler for bf16 training.
+        scaler: Optional AMP grad scaler for bf16 training. Not used for fp8.
+        precision: Training precision passed to `autocast`.
+        write_chunks: Optional write-chunk token ids `(B, n_write, T)`. When provided
+            and `model.cam_enabled`, the CAM buffer is populated via sequential writes
+            before each forward pass so CAM parameters receive training gradients.
 
     Returns:
         Task loss value for this step.
     """
     optimizer.zero_grad()
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):  # type: ignore
-        logits, _, _, _, gate_vals, _, _ = model(tokens, return_gates=True)
+    with make_autocast(precision):  # type: ignore
+        btags, bvals = (
+            build_cam_buffer(model, write_chunks)
+            if write_chunks is not None and model.cam_enabled  # type: ignore
+            else (None, None)
+        )
+        logits, _, _, _, gate_vals, _, _ = model(
+            tokens, btags, bvals, return_gates=True
+        )
         loss_task = F.cross_entropy(logits.view(-1, logits.shape[-1]), targets.view(-1))
     if scaler:
         scaler.scale(loss_task).backward()
@@ -72,8 +114,15 @@ def projected_step(
     ]
 
     optimizer.zero_grad()
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):  # type: ignore
-        logits, side, _, _, gate_vals, _, _ = model(tokens, return_gates=True)
+    with make_autocast(precision):  # type: ignore
+        btags, bvals = (
+            build_cam_buffer(model, write_chunks)
+            if write_chunks is not None and model.cam_enabled  # type: ignore
+            else (None, None)
+        )
+        logits, side, _, _, gate_vals, _, _ = model(
+            tokens, btags, bvals, return_gates=True
+        )
         loss_info = gate_info_loss_from_vals(gate_vals, model.n_layers)  # type: ignore
 
         if model.cam_enabled:
