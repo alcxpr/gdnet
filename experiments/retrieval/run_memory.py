@@ -1,11 +1,10 @@
 """Replication of the pos_gate retrieval experiment using gdnet.memory.Memory.
 
 Tests C1/C2/C3 accuracy with the production Memory class, which writes chunks
-sequentially through memory.write() (val detached) and reads via fused_mem_read.
+sequentially through memory.write() and reads via fused_mem_read.
 
 The original experiment (run.py / cam.py) built buffer_tags and buffer_vals inline
-in one batched forward pass with no detach. This script tests whether the val detach
-in memory.write() affects C2 recency disambiguation.
+in one batched forward pass. This script tests the sequential write path.
 
 Usage:
     python experiments/retrieval/run_memory.py
@@ -57,7 +56,7 @@ def _entropy(w: torch.Tensor) -> torch.Tensor:
 class SequentialMemoryModel(nn.Module):
     """Wraps Memory with a sequential chunk encoder for the retrieval task.
 
-    Write chunks are processed one at a time through memory.write() (val detached).
+    Write chunks are processed one at a time through memory.write().
     The query chunk is processed through memory.read() via fused_mem_read.
     """
 

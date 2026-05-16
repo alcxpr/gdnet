@@ -91,7 +91,7 @@ class Memory(nn.Module):
         buffer_tags = torch.roll(buffer_tags, 1, dims=1)  # type: ignore[reportPrivateImportUsage]
         buffer_vals = torch.roll(buffer_vals, 1, dims=1)  # type: ignore[reportPrivateImportUsage]
         buffer_tags[:, 0, :] = tag
-        buffer_vals[:, 0, :] = val.detach()
+        buffer_vals[:, 0, :] = val
         return buffer_tags, buffer_vals
 
     def read(
