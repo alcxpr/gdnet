@@ -27,7 +27,7 @@ from gdnet.loss import projected_step
 from gdnet.model import GDNet
 from gdnet.utils.fp8 import Precision
 
-VOCAB_SIZE = 3200
+VOCAB_SIZE = 100_000
 N_WRITE = 4
 
 CONFIGS = [
@@ -49,8 +49,8 @@ CONFIGS = [
 def make_model(T: int) -> GDNet:
     return GDNet(
         vocab_size=VOCAB_SIZE,
-        d_embed=1024,
-        d=2048,
+        d_embed=512,
+        d=1024,
         n_layers=8,
         n_cycles=2,
         chunk_size=T,
