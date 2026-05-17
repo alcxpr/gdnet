@@ -8,7 +8,6 @@ dependencies = [
     "nvidia-ml-py>=13.595.45",
     "rich>=15.0.0",
     "torch==2.8.0",
-    "transformer-engine[pytorch]>=2.15.0",
 ]
 
 [tool.pytest.ini_options]
