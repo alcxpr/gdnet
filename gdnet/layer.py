@@ -7,7 +7,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import triton
 
-from .kernel.gated_causal_depthwise_conv import CausalDWConvFunction, CausalDWConvFunctionSP, gated_output
+from .kernel.gated_causal_depthwise_conv import (
+    CausalDWConvFunction,
+    CausalDWConvFunctionSP,
+    gated_output,
+)
 from .utils.sp import SPHaloExchange
 
 _SN_PREFIXES = ("gf", "gb", "rf", "rb")
@@ -136,7 +140,7 @@ class GDLayer(nn.Module):
         """Compute causal conv via Triton, return (conv_3d, conv_flat).
 
         conv_3d is (B, T, d) float32; conv_flat is (B*T, d) float32.
-        Both share the same storage — use conv_3d for R, conv_flat for gated_output.
+        Both share the same storage - use conv_3d for R, conv_flat for gated_output.
         """
         B, T, d = fwd.shape
         k = conv_module.size
@@ -144,7 +148,7 @@ class GDLayer(nn.Module):
         x_dt = fwd.float().permute(0, 2, 1).contiguous()
         W_conv = conv_module.conv.weight.float().squeeze(1)
         conv_out_dt = CausalDWConvFunction.apply(x_dt, W_conv, T, k, BLOCK_T)
-        conv_3d = conv_out_dt.permute(0, 2, 1).contiguous()
+        conv_3d = conv_out_dt.permute(0, 2, 1).contiguous()  # type: ignore
         return conv_3d, conv_3d.view(B * T, d)
 
     def _conv_flat_sp(
@@ -159,10 +163,10 @@ class GDLayer(nn.Module):
         BLOCK_T = min(triton.next_power_of_2(T), 64)
         x_dt = fwd.float().permute(0, 2, 1).contiguous()
         W_conv = conv_module.conv.weight.float().squeeze(1)
-        edge = x_dt[:, :, -(k - 1):].contiguous()
+        edge = x_dt[:, :, -(k - 1) :].contiguous()
         halo_dt = SPHaloExchange.apply(edge, sp_group)
         conv_out_dt = CausalDWConvFunctionSP.apply(x_dt, halo_dt, W_conv, T, k, BLOCK_T)
-        conv_3d = conv_out_dt.permute(0, 2, 1).contiguous()
+        conv_3d = conv_out_dt.permute(0, 2, 1).contiguous()  # type: ignore
         return conv_3d, conv_3d.view(B * T, d)
 
     def fwd_step(
@@ -173,10 +177,14 @@ class GDLayer(nn.Module):
         R = self._recovery("rf", side, conv_3d.to(fwd.dtype))
         _sync_sn(self.gf_W1)  # type: ignore
         fwd_out, side_out = gated_output(
-            conv_flat, side, R,
-            self.gf_W1.weight, self.gf_W1.bias,  # type: ignore
+            conv_flat,
+            side,
+            R,
+            self.gf_W1.weight,  # type: ignore
+            self.gf_W1.bias,  # type: ignore
             self.gf_norm.weight,  # type: ignore
-            self.gf_W2.weight, self.gf_W2.bias,  # type: ignore
+            self.gf_W2.weight,  # type: ignore
+            self.gf_W2.bias,  # type: ignore
         )
         if return_gate:
             return (
@@ -209,10 +217,14 @@ class GDLayer(nn.Module):
         R = self._recovery("rf", side, conv_3d.to(fwd.dtype))
         _sync_sn(self.gf_W1)  # type: ignore
         fwd_out, side_out = gated_output(
-            conv_flat, side, R,
-            self.gf_W1.weight, self.gf_W1.bias,  # type: ignore
+            conv_flat,
+            side,
+            R,
+            self.gf_W1.weight,  # type: ignore
+            self.gf_W1.bias,  # type: ignore
             self.gf_norm.weight,  # type: ignore
-            self.gf_W2.weight, self.gf_W2.bias,  # type: ignore
+            self.gf_W2.weight,  # type: ignore
+            self.gf_W2.bias,  # type: ignore
         )
         if return_gate:
             return (
@@ -232,10 +244,14 @@ class GDLayer(nn.Module):
         R = self._recovery("rb", side, conv_3d.to(fwd.dtype))
         _sync_sn(self.gb_W1)  # type: ignore
         fwd_out, side_out = gated_output(
-            conv_flat, side, R,
-            self.gb_W1.weight, self.gb_W1.bias,  # type: ignore
+            conv_flat,
+            side,
+            R,
+            self.gb_W1.weight,  # type: ignore
+            self.gb_W1.bias,  # type: ignore
             self.gb_norm.weight,  # type: ignore
-            self.gb_W2.weight, self.gb_W2.bias,  # type: ignore
+            self.gb_W2.weight,  # type: ignore
+            self.gb_W2.bias,  # type: ignore
         )
         return fwd_out.view(B, T, d).to(fwd.dtype), side_out.view(B, T, d).to(fwd.dtype)
 
@@ -260,9 +276,13 @@ class GDLayer(nn.Module):
         R = self._recovery("rb", side, conv_3d.to(fwd.dtype))
         _sync_sn(self.gb_W1)  # type: ignore
         fwd_out, side_out = gated_output(
-            conv_flat, side, R,
-            self.gb_W1.weight, self.gb_W1.bias,  # type: ignore
+            conv_flat,
+            side,
+            R,
+            self.gb_W1.weight,  # type: ignore
+            self.gb_W1.bias,  # type: ignore
             self.gb_norm.weight,  # type: ignore
-            self.gb_W2.weight, self.gb_W2.bias,  # type: ignore
+            self.gb_W2.weight,  # type: ignore
+            self.gb_W2.bias,  # type: ignore
         )
         return fwd_out.view(B, T, d).to(fwd.dtype), side_out.view(B, T, d).to(fwd.dtype)
