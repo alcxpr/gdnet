@@ -32,6 +32,7 @@ def gate_info_loss_from_vals(
 def build_cam_buffer(
     model: nn.Module,
     write_chunks: torch.Tensor,
+    sp_group: dist.ProcessGroup | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Populate the CAM buffer by processing write chunks sequentially.
 
@@ -41,6 +42,7 @@ def build_cam_buffer(
     Args:
         model: GDNet model with `cam_enabled`, `cam`, and `write_cam` attributes.
         write_chunks: Write-chunk token ids `(B, n_write, T)`.
+        sp_group: Sequence-parallel process group, or None for single-device.
 
     Returns:
         `(buffer_tags, buffer_vals)` ready to pass into `model.forward`.
@@ -51,7 +53,9 @@ def build_cam_buffer(
     bvals = torch.zeros(B, model.cam.n_slots, model.cam.d_c, device=device)  # type: ignore
     with torch.no_grad():
         for i in range(n_write):
-            _, side, _, _, _, _, fwd_last = model(write_chunks[:, i], btags, bvals)
+            _, side, _, _, _, _, fwd_last = model(
+                write_chunks[:, i], btags, bvals, sp_group=sp_group
+            )
             btags, bvals = model.write_cam(fwd_last, side, btags, bvals)  # type: ignore
     return btags, bvals
 
@@ -66,6 +70,7 @@ def projected_step(
     scaler: torch.cuda.amp.GradScaler | None = None,
     precision: Precision = "bf16",
     write_chunks: torch.Tensor | None = None,
+    sp_group: dist.ProcessGroup | None = None,
 ) -> float:
     """Single training step with projected gradient optimization.
 
@@ -99,12 +104,12 @@ def projected_step(
     optimizer.zero_grad()
     with make_autocast(precision):  # type: ignore
         btags, bvals = (
-            build_cam_buffer(model, write_chunks)
+            build_cam_buffer(model, write_chunks, sp_group=sp_group)
             if write_chunks is not None and model.cam_enabled  # type: ignore
             else (None, None)
         )
         logits, side, _, _, gate_vals, _, _ = model(
-            tokens, btags, bvals, return_gates=True
+            tokens, btags, bvals, return_gates=True, sp_group=sp_group
         )
         loss_task = F.cross_entropy(logits.view(-1, logits.shape[-1]), targets.view(-1))
 
@@ -133,8 +138,8 @@ def projected_step(
     if model.trans_enabled and tokens.shape[1] >= 2:
         with make_autocast(precision):
             mid = tokens.shape[1] // 2
-            _, side1, _, _, _, _, _ = model(tokens[:, :mid])
-            _, side2, _, _, _, _, _ = model(tokens[:, mid:])
+            _, side1, _, _, _, _, _ = model(tokens[:, :mid], sp_group=sp_group)
+            _, side2, _, _, _, _, _ = model(tokens[:, mid:], sp_group=sp_group)
             z_t = side1[0].mean(dim=1)
             z_t1 = side2[0].mean(dim=1).detach()
             loss_trans = 0.1 * model.trans_ops.loss(z_t, z_t1)  # type: ignore

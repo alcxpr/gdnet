@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -72,20 +73,28 @@ class GDNet(nn.Module):
         self,
         fwd: torch.Tensor,
         side: list[torch.Tensor],
+        sp_group: dist.ProcessGroup | None = None,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Run one forward+backward pass through all layers.
 
         Args:
             fwd: Forward stream `(B, T, d)`.
             side: Per-layer side streams, each `(B, T, d)`.
+            sp_group: Sequence-parallel process group, or None for single-device.
 
         Returns:
             Updated `(fwd, side)`.
         """
         for i, layer in enumerate(self.layers):
-            fwd, side[i] = layer.fwd_step(fwd, side[i])  # type: ignore
+            if sp_group is not None:
+                fwd, side[i] = layer.fwd_step_sp(fwd, side[i], sp_group)  # type: ignore
+            else:
+                fwd, side[i] = layer.fwd_step(fwd, side[i])  # type: ignore
         for i, layer in reversed(list(enumerate(self.layers))):
-            fwd, side[i] = layer.bwd_step(fwd, side[i])  # type: ignore
+            if sp_group is not None:
+                fwd, side[i] = layer.bwd_step_sp(fwd, side[i], sp_group)  # type: ignore
+            else:
+                fwd, side[i] = layer.bwd_step(fwd, side[i])  # type: ignore
         return fwd, side
 
     def forward(
@@ -94,6 +103,7 @@ class GDNet(nn.Module):
         buffer_tags: torch.Tensor | None = None,
         buffer_vals: torch.Tensor | None = None,
         return_gates: bool = False,
+        sp_group: dist.ProcessGroup | None = None,
     ) -> tuple[
         torch.Tensor,
         list[torch.Tensor],
@@ -144,12 +154,20 @@ class GDNet(nn.Module):
         for _ in range(self.n_cycles):
             if return_gates:
                 for i, layer in enumerate(self.layers):
-                    fwd, side[i], g = layer.fwd_step(fwd, side[i], return_gate=True)  # type: ignore
+                    if sp_group is not None:
+                        fwd, side[i], g = layer.fwd_step_sp(
+                            fwd, side[i], sp_group, return_gate=True
+                        )  # type: ignore
+                    else:
+                        fwd, side[i], g = layer.fwd_step(fwd, side[i], return_gate=True)  # type: ignore
                     gate_vals.append(g)
                 for i, layer in reversed(list(enumerate(self.layers))):
-                    fwd, side[i] = layer.bwd_step(fwd, side[i])  # type: ignore
+                    if sp_group is not None:
+                        fwd, side[i] = layer.bwd_step_sp(fwd, side[i], sp_group)  # type: ignore
+                    else:
+                        fwd, side[i] = layer.bwd_step(fwd, side[i])  # type: ignore
             else:
-                fwd, side = self.one_cycle(fwd, side)
+                fwd, side = self.one_cycle(fwd, side, sp_group)
 
         fwd_last = fwd[:, -1, :]
         cam_weights: torch.Tensor | None = None
