@@ -186,8 +186,8 @@ def make_model(T_local: int) -> GDNet:
 
 
 def param_counts(model: GDNet) -> tuple[int, int]:
-    total = sum(p.numel() for p in model.parameters())
-    embed = sum(p.numel() for p in model.embed.parameters())
+    total = sum(p.numel() for _, p in model.named_parameters(remove_duplicate=False))
+    embed = model.embed.weight.numel()
     return total, total - embed
 
 
