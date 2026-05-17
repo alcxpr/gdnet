@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -113,17 +115,18 @@ def projected_step(
         )
         loss_task = F.cross_entropy(logits.view(-1, logits.shape[-1]), targets.view(-1))
 
-    # 1. Task backward — keep graph alive for the info backward below.
-    if scaler:
-        scaler.scale(loss_task).backward(retain_graph=True)
-    else:
-        loss_task.backward(retain_graph=True)
+    base_model = getattr(model, "module", model)
+    no_sync = getattr(model, "no_sync", contextlib.nullcontext)
+
+    with no_sync():
+        if scaler:
+            scaler.scale(loss_task).backward(retain_graph=True)
+        else:
+            loss_task.backward(retain_graph=True)
     g_task = [
         p.grad.clone() if p.grad is not None else torch.zeros_like(p)  # type: ignore
         for p in params
     ]
-
-    base_model = getattr(model, "module", model)
 
     optimizer.zero_grad()
     with make_autocast(precision):  # type: ignore
@@ -132,10 +135,11 @@ def projected_step(
             loss_info_base = loss_info_base + 0.1 * base_model.cam.recon_loss(  # type: ignore
                 side[0].mean(dim=1)
             )
-    if scaler:
-        scaler.scale(loss_info_base).backward()
-    else:
-        loss_info_base.backward()
+    with no_sync():
+        if scaler:
+            scaler.scale(loss_info_base).backward()
+        else:
+            loss_info_base.backward()
 
     if base_model.trans_enabled and tokens.shape[1] >= 2:
         with make_autocast(precision):  # type: ignore
@@ -145,10 +149,11 @@ def projected_step(
             z_t = side1[0].mean(dim=1)
             z_t1 = side2[0].mean(dim=1).detach()
             loss_trans = 0.1 * model.trans_ops.loss(z_t, z_t1)  # type: ignore
-        if scaler:
-            scaler.scale(loss_trans).backward()
-        else:
-            loss_trans.backward()
+        with no_sync():
+            if scaler:
+                scaler.scale(loss_trans).backward()
+            else:
+                loss_trans.backward()
 
     g_info = [
         p.grad.clone() if p.grad is not None else torch.zeros_like(p)  # type: ignore
@@ -168,6 +173,13 @@ def projected_step(
     optimizer.zero_grad()
     for p, gt, gi in zip(params, g_task, g_info):
         p.grad = gt + beta * (gi - proj_coef * gt)
+
+    if dist.is_initialized():
+        world_size = dist.get_world_size()
+        for p in params:
+            if p.grad is not None:
+                dist.all_reduce(p.grad)
+                p.grad /= world_size
 
     if scaler:
         scaler.unscale_(optimizer)
