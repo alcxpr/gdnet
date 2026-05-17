@@ -23,7 +23,8 @@ def _rmsnorm_fwd_kernel(
     mask = cols < d
     base = row * d
     h = tl.load(H_ptr + base + cols, mask=mask, other=0.0)
-    rstd = tl.math.rsqrt(tl.sum(h * h, axis=0) / d + eps)
+    h_f = h.to(tl.float32)
+    rstd = tl.math.rsqrt(tl.sum(h_f * h_f, axis=0) / d + eps)
     tl.store(RSTD_ptr + row, rstd)
     w_norm = tl.load(W_norm_ptr + cols, mask=mask, other=1.0)
     tl.store(H_NORM_ptr + base + cols, h * rstd * w_norm, mask=mask)
@@ -47,18 +48,12 @@ def _gate_stream_update_fwd_kernel(
     cols = tl.arange(0, BLOCK_D)
     mask = cols < d
     base = row * d
-    g = tl.sigmoid(tl.load(G_PRE_ptr + base + cols, mask=mask, other=0.0))
-    fwd_t = tl.load(CONV_ptr + base + cols, mask=mask, other=0.0)
+    g = tl.sigmoid(tl.load(G_PRE_ptr + base + cols, mask=mask, other=0.0).to(tl.float32))
+    fwd_t = tl.load(CONV_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
     side = tl.load(SIDE_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
     R = tl.load(R_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
-    tl.store(
-        FWD_OUT_ptr + base + cols, (fwd_t * g + side * R).to(tl.bfloat16), mask=mask
-    )
-    tl.store(
-        SIDE_OUT_ptr + base + cols,
-        (fwd_t * (1.0 - g) + side * (1.0 - R)).to(tl.bfloat16),
-        mask=mask,
-    )
+    tl.store(FWD_OUT_ptr + base + cols, fwd_t * g + side * R, mask=mask)
+    tl.store(SIDE_OUT_ptr + base + cols, fwd_t * (1.0 - g) + side * (1.0 - R), mask=mask)
 
 
 @triton.jit
@@ -92,8 +87,8 @@ def _gate_bwd_elem_kernel(
 
         d_fwd = tl.load(dFWD_ptr + base + cols)
         d_side = tl.load(dSIDE_ptr + base + cols)
-        g_pre = tl.load(G_PRE_ptr + base + cols)
-        conv = tl.load(CONV_ptr + base + cols)
+        g_pre = tl.load(G_PRE_ptr + base + cols).to(tl.float32)
+        conv = tl.load(CONV_ptr + base + cols).to(tl.float32)
         side = tl.load(SIDE_ptr + base + cols).to(tl.float32)
         R = tl.load(R_ptr + base + cols).to(tl.float32)
 
@@ -125,7 +120,7 @@ def _rmsnorm_bwd_kernel(
     mask = cols < d
 
     d_h_norm = tl.load(d_h_norm_ptr + base + cols, mask=mask, other=0.0)
-    h = tl.load(H_ptr + base + cols, mask=mask, other=0.0)
+    h = tl.load(H_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
     rstd = tl.load(RSTD_ptr + row)
     w_norm = tl.load(W_norm_ptr + cols, mask=mask, other=1.0)
 
@@ -164,8 +159,8 @@ def gate_stream_update_fwd(
     BLOCK_D: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     n_rows, d = g_pre.shape
-    fwd_out = torch.empty(n_rows, d, dtype=torch.bfloat16, device=g_pre.device)  # type: ignore
-    side_out = torch.empty(n_rows, d, dtype=torch.bfloat16, device=g_pre.device)  # type: ignore
+    fwd_out = torch.empty(n_rows, d, dtype=g_pre.dtype, device=g_pre.device)  # type: ignore
+    side_out = torch.empty(n_rows, d, dtype=g_pre.dtype, device=g_pre.device)  # type: ignore
     _gate_stream_update_fwd_kernel[(n_rows,)](
         g_pre,
         conv_flat,
@@ -229,11 +224,11 @@ def gate_w2_bwd(
         BLOCK_D=block_d,
         num_warps=num_warps,  # type: ignore
     )
-    H_NORM = H * RSTD[:, None] * W_norm
+    H_NORM = H.float() * RSTD[:, None] * W_norm.float()
     dW2 = torch.mm(d_g_pre.t(), H_NORM)  # type: ignore
     db2 = d_g_pre.sum(0)
-    d_h_norm = torch.mm(d_g_pre, W2)  # type: ignore
-    dW_norm = (d_h_norm * H * RSTD[:, None]).sum(0)
+    d_h_norm = torch.mm(d_g_pre, W2.float())  # type: ignore
+    dW_norm = (d_h_norm * H.float() * RSTD[:, None]).sum(0)
     return d_h_norm, d_conv, d_side, d_R, dW2, db2, dW_norm
 
 

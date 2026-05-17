@@ -145,8 +145,8 @@ class GDLayer(nn.Module):
         B, T, d = fwd.shape
         k = conv_module.size
         BLOCK_T = min(triton.next_power_of_2(T), 64)
-        x_dt = fwd.float().permute(0, 2, 1).contiguous()
-        W_conv = conv_module.conv.weight.float().squeeze(1)
+        x_dt = fwd.permute(0, 2, 1).contiguous()
+        W_conv = conv_module.conv.weight.squeeze(1)
         conv_out_dt = CausalDWConvFunction.apply(x_dt, W_conv, T, k, BLOCK_T)
         conv_3d = conv_out_dt.permute(0, 2, 1).contiguous()  # type: ignore
         return conv_3d, conv_3d.view(B * T, d)
@@ -161,8 +161,8 @@ class GDLayer(nn.Module):
         B, T, d = fwd.shape
         k = conv_module.size
         BLOCK_T = min(triton.next_power_of_2(T), 64)
-        x_dt = fwd.float().permute(0, 2, 1).contiguous()
-        W_conv = conv_module.conv.weight.float().squeeze(1)
+        x_dt = fwd.permute(0, 2, 1).contiguous()
+        W_conv = conv_module.conv.weight.squeeze(1)
         edge = x_dt[:, :, -(k - 1) :].contiguous()
         halo_dt = SPHaloExchange.apply(edge, sp_group)
         conv_out_dt = CausalDWConvFunctionSP.apply(x_dt, halo_dt, W_conv, T, k, BLOCK_T)

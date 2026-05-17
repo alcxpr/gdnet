@@ -186,7 +186,7 @@ def causal_dwconv_fwd(
     BLOCK_T: int,
 ) -> torch.Tensor:
     B, d, _ = x_dt.shape
-    out = torch.empty(B, d, T, dtype=torch.float32, device=x_dt.device)  # type: ignore
+    out = torch.empty(B, d, T, dtype=x_dt.dtype, device=x_dt.device)  # type: ignore
     _causal_dwconv_fwd_kernel[(B, d)](
         x_dt,
         x_dt,  # dummy, never read when USE_HALO=False
@@ -232,7 +232,7 @@ def causal_dwconv_fwd_sp(
         Conv output (B, d, T).
     """
     B, d, _ = x_dt.shape
-    out = torch.empty(B, d, T, dtype=torch.float32, device=x_dt.device)  # type: ignore
+    out = torch.empty(B, d, T, dtype=x_dt.dtype, device=x_dt.device)  # type: ignore
     _causal_dwconv_fwd_kernel[(B, d)](
         x_dt,
         halo_dt,

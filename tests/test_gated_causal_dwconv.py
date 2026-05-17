@@ -21,18 +21,24 @@ DEVICE = "cuda"
 def _reference_fwd(x, side, R, W_conv, W1, b1, W_norm, W2, b2, eps=1e-6):
     B, T, d = x.shape
     k = W_conv.shape[1]
-    x_t = x.float().transpose(1, 2)
+    dtype = x.dtype
+    # conv: fp32 accumulation, output in input dtype (matches Triton kernel)
     conv_out = F.conv1d(
-        F.pad(x_t, (k - 1, 0)), W_conv.unsqueeze(1), groups=d
-    ).transpose(1, 2)
+        F.pad(x.float().transpose(1, 2), (k - 1, 0)), W_conv.unsqueeze(1), groups=d
+    ).transpose(1, 2).to(dtype)
     n_rows = B * T
-    h = F.silu(F.linear(conv_out.reshape(n_rows, d), W1, b1))
-    h_norm = h / h.pow(2).mean(-1, keepdim=True).add(eps).sqrt() * W_norm
-    g = F.sigmoid(F.linear(h_norm, W2, b2)).view(B, T, d)
+    conv_flat = conv_out.reshape(n_rows, d)
+    # linear in input dtype (weights cast to match, same as gated_output)
+    h = F.silu(F.linear(conv_flat, W1.to(dtype), b1.to(dtype)))
+    # rmsnorm: fp32 variance, output in dtype (matches _rmsnorm_fwd_kernel)
+    h_f = h.float()
+    rstd = (h_f.pow(2).mean(-1, keepdim=True) + eps).rsqrt()
+    h_norm = (h_f * rstd * W_norm.float()).to(dtype)
+    # linear in dtype, sigmoid in fp32 (matches kernel)
+    g = torch.sigmoid(F.linear(h_norm, W2.to(dtype), b2.to(dtype)).float()).view(B, T, d)
     s, R_f = side.float(), R.float()
-    return (conv_out * g + s * R_f).bfloat16(), (
-        conv_out * (1 - g) + s * (1 - R_f)
-    ).bfloat16()
+    conv_out_f = conv_out.float()
+    return (conv_out_f * g + s * R_f).to(dtype), (conv_out_f * (1 - g) + s * (1 - R_f)).to(dtype)
 
 
 def _make(B=2, T=16, d=128, k=4, seed=0):
@@ -161,13 +167,15 @@ def test_gate_stream_update_fwd(n_rows, d):
     g = F.sigmoid(g_pre)
     s, Rf = side.float(), R.float()
 
+    assert fwd_out.dtype == g_pre.dtype
+    assert side_out.dtype == g_pre.dtype
     assert torch.allclose(  # type: ignore
-        fwd_out.float(), (conv_f * g + s * Rf).bfloat16().float(), atol=1e-2
+        fwd_out.float(), conv_f * g + s * Rf, atol=1e-5
     )
     assert torch.allclose(  # type: ignore
         side_out.float(),
-        (conv_f * (1 - g) + s * (1 - Rf)).bfloat16().float(),
-        atol=1e-2,
+        conv_f * (1 - g) + s * (1 - Rf),
+        atol=1e-5,
     )
 
 
