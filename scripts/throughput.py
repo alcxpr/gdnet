@@ -12,7 +12,6 @@ Multi-GPU (sequence parallelism, T is split across ranks):
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from contextlib import nullcontext
@@ -23,18 +22,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import torch
 import torch._functorch.config
 import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 torch.set_float32_matmul_precision("high")
 
 from gdnet.layer import freeze_sn_iteration
 from gdnet.loss import projected_step
 from gdnet.model import GDNet
+from gdnet.utils.distributed import destroy, init_distributed, is_main_process
 from gdnet.utils.fp8 import Precision
 
 VOCAB_SIZE = 100_000
 N_WRITE = 4
 
-# B*T
 CONFIGS = [
     (4, 512),
     (8, 512),
@@ -50,17 +50,6 @@ CONFIGS = [
     (4, 8192),
     (8, 8192),
 ]
-
-
-def setup_dist() -> tuple[int, int, dist.ProcessGroup | None]:
-    """Init process group if running under torchrun. Returns (rank, world_size, sp_group)."""
-    if "LOCAL_RANK" not in os.environ:
-        return 0, 1, None
-    dist.init_process_group("nccl")
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    sp_group = dist.group.WORLD
-    return dist.get_rank(), dist.get_world_size(), sp_group
 
 
 def make_model(T_local: int) -> GDNet:
@@ -88,6 +77,7 @@ def run_config(
     compile_model: bool,
     sp_group: dist.ProcessGroup | None,
     world_size: int,
+    local_rank: int,
     n_warmup: int = 5,
     n_steps: int = 30,
 ) -> tuple[float, float, int, int, float]:
@@ -95,19 +85,25 @@ def run_config(
     model = make_model(T_local)
     total_params, non_embed_params = param_counts(model)
 
+    if world_size > 1:
+        model = DDP(model, device_ids=[local_rank])  # type: ignore
+
     if compile_model:
         torch._functorch.config.donated_buffer = False
         model = torch.compile(model)  # type: ignore
 
+    # Access underlying GDNet for cam_enabled check
+    base_model: GDNet = getattr(model, "module", model)  # type: ignore
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)  # type: ignore
     params = list(model.parameters())  # type: ignore
 
-    device = next(iter(model.parameters())).device  # type: ignore
+    device = torch.device(f"cuda:{local_rank}")  # type: ignore
     tokens = torch.randint(0, VOCAB_SIZE, (B, T_local), device=device)  # type: ignore
     targets = torch.randint(0, VOCAB_SIZE, (B, T_local), device=device)  # type: ignore
     write_chunks = (
         torch.randint(0, VOCAB_SIZE, (B, N_WRITE, T_local), device=device)  # type: ignore
-        if use_cam and model.cam_enabled  # type: ignore
+        if use_cam and base_model.cam_enabled
         else None
     )
 
@@ -126,7 +122,7 @@ def run_config(
                 write_chunks=write_chunks,
                 sp_group=sp_group,
             )
-    torch.cuda.synchronize()
+    torch.cuda.synchronize(device)
 
     torch.cuda.reset_peak_memory_stats(device)
     t0 = time.perf_counter()
@@ -143,10 +139,10 @@ def run_config(
                 write_chunks=write_chunks,
                 sp_group=sp_group,
             )
-    torch.cuda.synchronize()
+    torch.cuda.synchronize(device)
 
     ms_per_step = (time.perf_counter() - t0) / n_steps * 1000
-    tokens_per_sec = B * T / (ms_per_step / 1000)  # full sequence across all ranks
+    tokens_per_sec = B * T / (ms_per_step / 1000)
     peak_mem_gb = torch.cuda.max_memory_allocated(device) / 1024**3
 
     del model
@@ -161,15 +157,16 @@ def print_table(
 ) -> None:
     print(f"\ncam={cam_label}  gpus={world_size}")
     print(
-        f"{'B':>4}  {'T':>4}  {'ms/step':>10}  {'tok/s':>12}  {'total params':>14}  {'non-embed':>12}  {'mem/gpu':>9}"
+        f"{'B':>4}  {'T':>5}  {'ms/step':>10}  {'tok/s':>12}"
+        f"  {'total params':>14}  {'non-embed':>12}  {'mem/gpu':>9}"
     )
-    print("-" * 82)
+    print("-" * 86)
     for B, T, ms, tps, total, non_embed, mem_gb in results:
         if ms != ms:
-            print(f"{B:>4}  {T:>4}  {'OOM':>10}")
+            print(f"{B:>4}  {T:>5}  {'OOM':>10}")
         else:
             print(
-                f"{B:>4}  {T:>4}  {ms:>10.2f}  {tps:>12,.0f}"
+                f"{B:>4}  {T:>5}  {ms:>10.2f}  {tps:>12,.0f}"
                 f"  {total / 1e6:>11.2f}M  {non_embed / 1e6:>9.2f}M"
                 f"  {mem_gb:>7.2f}G"
             )
@@ -191,11 +188,16 @@ def main() -> None:
             print("TransformerEngine not found — cannot run fp8")
             return
 
-    rank, world_size, sp_group = setup_dist()
+    init_distributed()
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    local_rank = int(__import__("os").environ.get("LOCAL_RANK", 0))
+    sp_group = dist.group.WORLD if dist.is_initialized() else None
+
     compile_flag = args.compile
     cam_modes = [True, False] if args.cam == "both" else [args.cam == "on"]
 
-    if rank == 0:
+    if is_main_process():
         print(f"precision={precision}  compile={compile_flag}  gpus={world_size}")
         print(f"Device: {torch.cuda.get_device_name(0)}")
 
@@ -203,24 +205,30 @@ def main() -> None:
         results = []
         for B, T in CONFIGS:
             if T % world_size != 0:
-                if rank == 0:
+                if is_main_process():
                     print(
                         f"  skip B={B} T={T}: not divisible by world_size={world_size}"
                     )
                 continue
             try:
                 ms, tps, total, non_embed, mem_gb = run_config(
-                    B, T, precision, use_cam, compile_flag, sp_group, world_size
+                    B,
+                    T,
+                    precision,
+                    use_cam,
+                    compile_flag,
+                    sp_group,
+                    world_size,
+                    local_rank,
                 )
                 results.append((B, T, ms, tps, total, non_embed, mem_gb))
             except torch.cuda.OutOfMemoryError:
                 results.append((B, T, float("nan"), float("nan"), 0, 0, 0.0))
                 torch.cuda.empty_cache()
-        if rank == 0:
+        if is_main_process():
             print_table(results, "on" if use_cam else "off", world_size)
 
-    if dist.is_initialized():
-        dist.destroy_process_group()
+    destroy()
 
 
 if __name__ == "__main__":
