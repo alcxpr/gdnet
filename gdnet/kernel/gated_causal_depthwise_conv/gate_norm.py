@@ -19,15 +19,16 @@ def _rmsnorm_fwd_kernel(
     row = tl.program_id(0)
     if row >= n_rows:
         return
+    # No mask: BLOCK_D == d (power-of-2) always, so all lanes are valid.
+    # Mask-free loads let the compiler emit ld.global.v4 instead of predicated scalars.
     cols = tl.arange(0, BLOCK_D)
-    mask = cols < d
     base = row * d
-    h = tl.load(H_ptr + base + cols, mask=mask, other=0.0)
+    h = tl.load(H_ptr + base + cols)
     h_f = h.to(tl.float32)
     rstd = tl.math.rsqrt(tl.sum(h_f * h_f, axis=0) / d + eps)
     tl.store(RSTD_ptr + row, rstd)
-    w_norm = tl.load(W_norm_ptr + cols, mask=mask, other=1.0)
-    tl.store(H_NORM_ptr + base + cols, h * rstd * w_norm, mask=mask)
+    w_norm = tl.load(W_norm_ptr + cols)
+    tl.store(H_NORM_ptr + base + cols, h * rstd * w_norm)
 
 
 @triton.jit
@@ -45,15 +46,15 @@ def _gate_stream_update_fwd_kernel(
     row = tl.program_id(0)
     if row >= n_rows:
         return
+    # No mask: BLOCK_D == d (power-of-2) always, so all lanes are valid.
     cols = tl.arange(0, BLOCK_D)
-    mask = cols < d
     base = row * d
-    g = tl.sigmoid(tl.load(G_PRE_ptr + base + cols, mask=mask, other=0.0).to(tl.float32))
-    fwd_t = tl.load(CONV_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
-    side = tl.load(SIDE_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
-    R = tl.load(R_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
-    tl.store(FWD_OUT_ptr + base + cols, fwd_t * g + side * R, mask=mask)
-    tl.store(SIDE_OUT_ptr + base + cols, fwd_t * (1.0 - g) + side * (1.0 - R), mask=mask)
+    g = tl.sigmoid(tl.load(G_PRE_ptr + base + cols).to(tl.float32))
+    fwd_t = tl.load(CONV_ptr + base + cols).to(tl.float32)
+    side = tl.load(SIDE_ptr + base + cols).to(tl.float32)
+    R = tl.load(R_ptr + base + cols).to(tl.float32)
+    tl.store(FWD_OUT_ptr + base + cols, fwd_t * g + side * R)
+    tl.store(SIDE_OUT_ptr + base + cols, fwd_t * (1.0 - g) + side * (1.0 - R))
 
 
 @triton.jit
@@ -115,18 +116,18 @@ def _rmsnorm_bwd_kernel(
     row = tl.program_id(0)
     if row >= n_rows:
         return
+    # No mask: BLOCK_D == d (power-of-2) always, so all lanes are valid.
     base = row * d
     cols = tl.arange(0, BLOCK_D)
-    mask = cols < d
 
-    d_h_norm = tl.load(d_h_norm_ptr + base + cols, mask=mask, other=0.0)
-    h = tl.load(H_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
+    d_h_norm = tl.load(d_h_norm_ptr + base + cols)
+    h = tl.load(H_ptr + base + cols).to(tl.float32)
     rstd = tl.load(RSTD_ptr + row)
-    w_norm = tl.load(W_norm_ptr + cols, mask=mask, other=1.0)
+    w_norm = tl.load(W_norm_ptr + cols)
 
     dot = tl.sum(d_h_norm * w_norm * h, axis=0)
     d_h = d_h_norm * rstd * w_norm - h * (rstd * rstd * rstd / d) * dot
-    tl.store(dH_ptr + base + cols, d_h, mask=mask)
+    tl.store(dH_ptr + base + cols, d_h)
 
 
 def rmsnorm_fwd(
