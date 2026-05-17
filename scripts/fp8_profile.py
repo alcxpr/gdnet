@@ -25,7 +25,7 @@ import torch.profiler
 from gdnet.layer import freeze_sn_iteration
 from gdnet.loss import projected_step
 from gdnet.model import GDNet
-from gdnet.utils.fp8 import Precision
+from gdnet.utils.fp8 import Precision, convert_to_fp8
 
 B, T = 4, 128
 N_WRITE = 4
@@ -138,9 +138,9 @@ def main():
 
     if "fp8" in precisions:
         try:
-            import transformer_engine  # type: ignore
+            import torchao.float8  # type: ignore  # noqa: F401
         except ImportError:
-            print("TransformerEngine not found - skipping fp8")
+            print("torchao not found - skipping fp8")
             precisions = [p for p in precisions if p != "fp8"]
 
     print(f"B={B} T={T} n_write={N_WRITE} d=256 n_layers=4 n_cycles=2")
@@ -149,6 +149,8 @@ def main():
 
     for precision in precisions:
         model = make_model()
+        if precision == "fp8":
+            convert_to_fp8(model)
         ms = bench(model, precision)
         print(f"{precision:<6}  {ms:.2f} ms/step")
 

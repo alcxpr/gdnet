@@ -37,7 +37,7 @@ from gdnet.layer import freeze_sn_iteration
 from gdnet.loss import projected_step
 from gdnet.model import GDNet
 from gdnet.utils.distributed import destroy, init_distributed, is_main_process
-from gdnet.utils.fp8 import Precision
+from gdnet.utils.fp8 import Precision, convert_to_fp8
 
 VOCAB_SIZE = 100_000
 N_WRITE = 4
@@ -209,6 +209,9 @@ def run_config(
     model = make_model(T_local)
     total_params, non_embed_params = param_counts(model)
 
+    if precision == "fp8":
+        convert_to_fp8(model)
+
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], static_graph=True)  # type: ignore
 
@@ -284,9 +287,9 @@ def main() -> None:
 
     if precision == "fp8":
         try:
-            import transformer_engine  # type: ignore  # noqa: F401
+            import torchao.float8  # type: ignore  # noqa: F401
         except ImportError:
-            print("TransformerEngine not found — cannot run fp8")
+            print("torchao not found — cannot run fp8")
             return
 
     init_distributed()
