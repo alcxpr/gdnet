@@ -137,7 +137,7 @@ class GDNet(nn.Module):
         fwd = self.proj_in(self.embed(tokens))
         dtype, device = fwd.dtype, fwd.device
         side: list[torch.Tensor] = [
-            torch.zeros(B, T, self.d, dtype=dtype, device=device)  # type: ignore
+            torch.zeros(B, T, self.d, dtype=dtype, device=device, requires_grad=True)  # type: ignore
             for _ in self.layers
         ]
 
