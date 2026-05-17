@@ -43,19 +43,19 @@ VOCAB_SIZE = 100_000
 N_WRITE = 4
 
 CONFIGS = [
-    (4,  512),
-    (8,  512),
-    (4,  1024),
-    (8,  1024),
+    (4, 512),
+    (8, 512),
+    (4, 1024),
+    (8, 1024),
     (16, 1024),
-    (4,  2048),
-    (8,  2048),
+    (4, 2048),
+    (8, 2048),
     (16, 2048),
-    (4,  4096),
-    (8,  4096),
+    (4, 4096),
+    (8, 4096),
     (16, 4096),
-    (4,  8192),
-    (8,  8192),
+    (4, 8192),
+    (8, 8192),
 ]
 
 
@@ -72,10 +72,10 @@ def gpu_table(handles: list) -> Table:
         name = pynvml.nvmlDeviceGetName(handle)
         util = pynvml.nvmlDeviceGetUtilizationRates(handle)
         mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        used_gb = mem.used / 1024**3
-        tot_gb = mem.total / 1024**3
+        used_gb = mem.used / 1024**3  # type: ignore
+        tot_gb = mem.total / 1024**3  # type: ignore
         pct = used_gb / tot_gb * 100
-        uc = "green" if util.gpu < 50 else "yellow" if util.gpu < 85 else "red"
+        uc = "green" if util.gpu < 50 else "yellow" if util.gpu < 85 else "red"  # type: ignore
         mc = "green" if pct < 50 else "yellow" if pct < 85 else "red"
         t.add_row(
             f"[{i}] {name}",
@@ -84,7 +84,7 @@ def gpu_table(handles: list) -> Table:
             f"{tot_gb:.2f} GB",
             f"[{mc}]{pct:.1f}%[/]",
         )
-        total_util += util.gpu
+        total_util += util.gpu  # type: ignore
         total_used += used_gb
         total_vram += tot_gb
 
@@ -116,7 +116,8 @@ def results_table(rows: list, cam_label: str, world_size: int, status: str) -> T
             t.add_row(str(B), str(T), "[red]OOM[/]", "", "", "")
         else:
             t.add_row(
-                str(B), str(T),
+                str(B),
+                str(T),
                 f"{ms:.1f}",
                 f"{tps:,.0f}",
                 f"{total / 1e6:.1f}M",
@@ -157,10 +158,14 @@ class Monitor:
         self._rows.append(row)
 
     def _render(self) -> Columns:
-        return Columns([
-            results_table(self._rows, self._cam_label, self._world_size, str(self._status)),
-            gpu_table(self._handles),
-        ])
+        return Columns(
+            [
+                results_table(
+                    self._rows, self._cam_label, self._world_size, str(self._status)
+                ),
+                gpu_table(self._handles),
+            ]
+        )
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -214,7 +219,7 @@ def run_config(
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)  # type: ignore
     params = list(model.parameters())  # type: ignore
 
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"cuda:{local_rank}")  # type: ignore
     tokens = torch.randint(0, VOCAB_SIZE, (B, T_local), device=device)  # type: ignore
     targets = torch.randint(0, VOCAB_SIZE, (B, T_local), device=device)  # type: ignore
     write_chunks = (
@@ -230,8 +235,13 @@ def run_config(
         with ctx:
             projected_step(
                 model,  # type: ignore
-                params, optimizer, tokens, targets,
-                precision=precision, write_chunks=write_chunks, sp_group=sp_group,
+                params,
+                optimizer,
+                tokens,
+                targets,
+                precision=precision,
+                write_chunks=write_chunks,
+                sp_group=sp_group,
             )
     torch.cuda.synchronize(device)
 
@@ -242,8 +252,13 @@ def run_config(
         with ctx:
             projected_step(
                 model,  # type: ignore
-                params, optimizer, tokens, targets,
-                precision=precision, write_chunks=write_chunks, sp_group=sp_group,
+                params,
+                optimizer,
+                tokens,
+                targets,
+                precision=precision,
+                write_chunks=write_chunks,
+                sp_group=sp_group,
             )
     torch.cuda.synchronize(device)
 
@@ -287,7 +302,9 @@ def main() -> None:
         n_gpus = pynvml.nvmlDeviceGetCount()
         handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(n_gpus)]
         console = Console()
-        console.print(f"precision={precision}  compile={compile_flag}  gpus={world_size}")
+        console.print(
+            f"precision={precision}  compile={compile_flag}  gpus={world_size}"
+        )
         console.print(f"Device: {torch.cuda.get_device_name(0)}")
         monitor = Monitor(handles)
 
@@ -296,37 +313,51 @@ def main() -> None:
             cam_label = "on" if use_cam else "off"
 
             if main_proc:
-                monitor.set_context(cam_label, world_size)
+                monitor.set_context(cam_label, world_size)  # type: ignore
 
-            with (Live(console=console, refresh_per_second=4) if main_proc else nullcontext()) as live:  # type: ignore
+            with (
+                Live(console=console, refresh_per_second=4)  # type: ignore
+                if main_proc
+                else nullcontext()
+            ) as live:  # type: ignore
                 if main_proc:
                     monitor.start(live)  # type: ignore
 
                 for B, T in CONFIGS:
                     if T % world_size != 0:
                         if main_proc:
-                            monitor.set_status(f"skip B={B} T={T}: not divisible by {world_size}")
+                            monitor.set_status(  # type: ignore
+                                f"skip B={B} T={T}: not divisible by {world_size}"
+                            )
                         continue
 
                     if main_proc:
-                        monitor.set_status(f"running B={B} T={T} (warmup)...")
+                        monitor.set_status(f"running B={B} T={T} (warmup)...")  # type: ignore
 
                     try:
                         ms, tps, total, non_embed, mem_gb = run_config(
-                            B, T, precision, use_cam, compile_flag,
-                            sp_group, world_size, local_rank,
+                            B,
+                            T,
+                            precision,
+                            use_cam,
+                            compile_flag,
+                            sp_group,
+                            world_size,
+                            local_rank,
                         )
                         if main_proc:
-                            monitor.set_status(f"done B={B} T={T}")
-                            monitor.push_row((B, T, ms, tps, total, non_embed, mem_gb))
+                            monitor.set_status(f"done B={B} T={T}")  # type: ignore
+                            monitor.push_row((B, T, ms, tps, total, non_embed, mem_gb))  # type: ignore
                     except torch.cuda.OutOfMemoryError:
                         torch.cuda.empty_cache()
                         if main_proc:
-                            monitor.set_status(f"OOM at B={B} T={T}")
-                            monitor.push_row((B, T, float("nan"), float("nan"), 0, 0, 0.0))
+                            monitor.set_status(f"OOM at B={B} T={T}")  # type: ignore
+                            monitor.push_row(  # type: ignore
+                                (B, T, float("nan"), float("nan"), 0, 0, 0.0)
+                            )
 
                 if main_proc:
-                    monitor.stop()
+                    monitor.stop()  # type: ignore
     finally:
         if main_proc:
             pynvml.nvmlShutdown()
