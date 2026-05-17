@@ -212,7 +212,7 @@ def run_config(
 
     if compile_model:
         torch._functorch.config.donated_buffer = False
-        model = torch.compile(model, mode="max-autotune")  # type: ignore
+        model = torch.compile(model)  # type: ignore
 
     base_model: GDNet = getattr(model, "module", model)  # type: ignore
 
