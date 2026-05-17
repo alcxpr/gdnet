@@ -123,11 +123,13 @@ def projected_step(
         for p in params
     ]
 
+    base_model = getattr(model, "module", model)
+
     optimizer.zero_grad()
-    with make_autocast(precision):
-        loss_info_base = gate_info_loss_from_vals(gate_vals, model.n_layers)  # type: ignore
-        if model.cam_enabled:
-            loss_info_base = loss_info_base + 0.1 * model.cam.recon_loss(  # type: ignore
+    with make_autocast(precision):  # type: ignore
+        loss_info_base = gate_info_loss_from_vals(gate_vals, base_model.n_layers)  # type: ignore
+        if base_model.cam_enabled:
+            loss_info_base = loss_info_base + 0.1 * base_model.cam.recon_loss(  # type: ignore
                 side[0].mean(dim=1)
             )
     if scaler:
@@ -135,8 +137,8 @@ def projected_step(
     else:
         loss_info_base.backward()
 
-    if model.trans_enabled and tokens.shape[1] >= 2:
-        with make_autocast(precision):
+    if base_model.trans_enabled and tokens.shape[1] >= 2:
+        with make_autocast(precision):  # type: ignore
             mid = tokens.shape[1] // 2
             _, side1, _, _, _, _, _ = model(tokens[:, :mid], sp_group=sp_group)
             _, side2, _, _, _, _, _ = model(tokens[:, mid:], sp_group=sp_group)
