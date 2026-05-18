@@ -187,7 +187,7 @@ def make_model(T_local: int) -> GDNet:
     return GDNet(
         vocab_size=VOCAB_SIZE,
         d_embed=512,
-        d=1024,
+        d=2048,
         n_layers=8,
         n_cycles=2,
         chunk_size=T_local,

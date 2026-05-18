@@ -148,6 +148,50 @@ def _gpu_table(handles: list) -> Table:
     return t
 
 
+def flops_per_step(
+    n_non_embed: int,
+    B: int,
+    T: int,
+    n_cycles: int,
+    cam_enabled: bool,
+    n_write: int,
+    trans_enabled: bool,
+) -> int:
+    """Estimate FLOPs for one projected-gradient step.
+
+    n_cycles scales all passes: layers are unique (weights counted once in
+    n_non_embed) but the forward loop applies them n_cycles times, so actual
+    FLOPs are n_cycles * 2N per token, not 2N.
+
+    Breakdown (each term already includes n_cycles):
+      - 1 forward + 2 backward (task + info on retained graph):  10N*B*T*C
+      - n_write CAM write passes (no-grad forward):              n_write*2N*B*T*C
+      - Trans loss (2x T/2 fwd + 1x T/2 bwd):                   4N*B*T*C
+    """
+    N = n_non_embed * n_cycles
+    flops = 10 * N * B * T
+    if cam_enabled:
+        flops += n_write * 2 * N * B * T
+    if trans_enabled:
+        flops += 4 * N * B * T
+    return flops
+
+
+# Dense (non-sparsity) peak TFLOP/s per GPU for common Hopper/Ampere cards.
+_PEAK_TFLOPS: dict[str, dict[str, float]] = {
+    "H200": {"fp8": 3958e12, "bf16": 1979e12, "fp32": 67e12},
+    "H100": {"fp8": 1979e12, "bf16": 989e12,  "fp32": 67e12},
+    "A100": {"fp8": 312e12,  "bf16": 312e12,  "fp32": 312e12},
+}
+
+
+def gpu_peak_flops(device_name: str, precision: str) -> float | None:
+    for key, table in _PEAK_TFLOPS.items():
+        if key in device_name:
+            return table.get(precision, table["bf16"])
+    return None
+
+
 class TrainingMonitor:
     _MAX_ROWS = 15
 
@@ -176,9 +220,9 @@ class TrainingMonitor:
     def tick(self, step: int) -> None:
         self._step = step
 
-    def log(self, step: int, loss: float, lr: float, tps: float, ms: float, tok_per_step: int) -> None:
+    def log(self, step: int, loss: float, lr: float, tps: float, ms: float, tok_per_step: int, mfu: float) -> None:
         self._step = step
-        self._rows.append((step, loss, lr, tps, ms, tok_per_step))
+        self._rows.append((step, loss, lr, tps, ms, tok_per_step, mfu))
         if len(self._rows) > self._MAX_ROWS:
             self._rows.pop(0)
 
@@ -194,8 +238,13 @@ class TrainingMonitor:
         t.add_column("tok/s", justify="right")
         t.add_column("tok/step", justify="right")
         t.add_column("ms/step", justify="right")
-        for step, loss, lr, tps, ms, tpst in self._rows:
-            t.add_row(str(step), f"{loss:.4f}", f"{lr:.2e}", f"{tps:,.0f}", f"{tpst:,}", f"{ms:.1f}")
+        t.add_column("MFU", justify="right")
+        for step, loss, lr, tps, ms, tpst, mfu in self._rows:
+            t.add_row(
+                str(step), f"{loss:.4f}", f"{lr:.2e}",
+                f"{tps:,.0f}", f"{tpst:,}", f"{ms:.1f}",
+                f"{mfu*100:.1f}%" if mfu > 0 else "—",
+            )
         return t
 
     def _render(self) -> Columns:
@@ -402,9 +451,14 @@ def main() -> None:
         ]
         console = Console()
         n_params = sum(p.numel() for p in base_model.parameters())
+        n_non_embed = n_params - base_model.embed.weight.numel()
+        device_name = torch.cuda.get_device_name(0)
+        peak_flops = gpu_peak_flops(device_name, precision)
         console.print(
             f"params={n_params / 1e6:.1f}M  precision={precision}  world={world_size}  total_steps={cfg.total_steps}"
         )
+        if peak_flops:
+            console.print(f"peak FLOP/s per GPU: {peak_flops/1e12:.0f} TFLOP/s ({device_name})")
         if cfg.resume:
             console.print(f"resumed from {cfg.resume} at step {step}")
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -494,6 +548,15 @@ def main() -> None:
 
                     if main_proc and step % cfg.log_every == 0:
                         dt = (time.perf_counter() - t0) / cfg.log_every
+                        flops = flops_per_step(
+                            n_non_embed,  # type: ignore
+                            B, T,
+                            base_model.n_cycles,
+                            base_model.cam_enabled,
+                            cfg.n_write,
+                            base_model.trans_enabled,
+                        )
+                        mfu = (flops / dt) / (world_size * peak_flops) if peak_flops else 0.0  # type: ignore
                         monitor.log(  # type: ignore
                             step,
                             loss,
@@ -501,6 +564,7 @@ def main() -> None:
                             B * T / dt,
                             dt * 1000,
                             B * T,
+                            mfu,
                         )
                         t0 = time.perf_counter()
 
