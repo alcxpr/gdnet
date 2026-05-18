@@ -7,7 +7,7 @@ kernel_size: 9
 n_slots: 32
 
 tokenizer: cl100k_base
-token_budget: 65536
+token_budget: 32768
 seed: 42
 
 lr: 3.0e-4
