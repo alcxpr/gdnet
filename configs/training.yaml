@@ -59,7 +59,7 @@ precision: fp8
 compile: true
 
 ckpt_dir: checkpoints
-ckpt_every: 1000
+ckpt_every: 5000
 resume: null
 log_every: 10
 num_data_workers: 4
