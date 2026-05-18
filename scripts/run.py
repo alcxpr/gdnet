@@ -1,7 +1,8 @@
 """Single entry point: prepare data then launch training.
 
-Auto-detects GPU count, derives tokenized file paths from phase metadata,
-runs prepare_data.py for any missing files, then hands off to training.py.
+Prepares the first phase's data, starts training immediately, then tokenizes
+remaining phases in a background thread. Training waits at each phase boundary
+using inotify (watchfiles) -- no polling loops.
 
 Usage:
     python scripts/run.py                                    # all defaults
@@ -16,9 +17,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import torch
@@ -64,6 +67,34 @@ def _prepare_cmd(phase: dict, path: str, encoding: str) -> list[str]:
     return cmd
 
 
+def _prepare_phase(phase: dict, encoding: str) -> None:
+    path = phase.get("path")
+    if not path:
+        return
+    if Path(path).exists():
+        size_gb = Path(path).stat().st_size / 1024**3
+        print(f"[data] found {path} ({size_gb:.2f} GB)", flush=True)
+        return
+    source = phase.get("dataset", "fineweb-edu")
+    if source not in ("fineweb-edu", "nemotron"):
+        return
+    print(f"[data] preparing {path} ...", flush=True)
+    subprocess.run(_prepare_cmd(phase, path, encoding), check=True)
+
+
+def _prepare_remaining(phases: list[dict], encoding: str) -> None:
+    seen: set[str] = set()
+    for phase in phases:
+        path = phase.get("path") or ""
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            _prepare_phase(phase, encoding)
+        except Exception as e:
+            print(f"[data] ERROR preparing {path}: {e}", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(ROOT / "configs" / "training.yaml"))
@@ -82,46 +113,41 @@ def main() -> None:
     encoding = cfg.get("tokenizer", "cl100k_base")
     phases = cfg.get("phases", [])
 
-    # Fill in paths for phases that don't have one
     for phase in phases:
         if not phase.get("path"):
             phase["path"] = _derive_path(phase, data_dir)
 
-    # Prepare missing binary files
-    if not args.skip_prepare:
+    if args.skip_prepare:
+        remaining_phases: list[dict] = []
+    else:
+        # Deduplicate by path so we don't double-prepare shared files
         seen: set[str] = set()
+        unique_phases: list[dict] = []
         for phase in phases:
-            path = phase.get("path")
-            if not path or path in seen:
-                continue
-            seen.add(path)
-            if Path(path).exists():
-                size_gb = Path(path).stat().st_size / 1024**3
-                print(f"[data] found {path} ({size_gb:.2f} GB)")
-                continue
-            source = phase.get("dataset", "fineweb-edu")
-            if source not in ("fineweb-edu", "nemotron"):
-                continue
-            print(f"[data] preparing {path} ...")
-            cmd = _prepare_cmd(phase, path, encoding)
-            subprocess.run(cmd, check=True)
+            path = phase.get("path") or ""
+            if path not in seen:
+                seen.add(path)
+                unique_phases.append(phase)
+
+        # Prepare the first phase synchronously so training can start immediately
+        _prepare_phase(unique_phases[0], encoding)
+        remaining_phases = unique_phases[1:]
 
     if args.prepare_only:
-        print("[run] --prepare-only: data ready, exiting.")
+        _prepare_remaining(remaining_phases, encoding)
+        print("[run] --prepare-only: all data ready, exiting.")
         return
 
-    # Write a temp config with paths filled in
+    # Write temp config with paths filled in
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", delete=False, dir=ROOT
     ) as tmp:
         yaml.dump(cfg, tmp)
         tmp_config = tmp.name
 
-    # Detect GPU count
     n_gpus = args.gpus or torch.cuda.device_count()
     n_gpus = max(n_gpus, 1)
-
-    print(f"[run] launching training on {n_gpus} GPU(s)")
+    print(f"[run] launching training on {n_gpus} GPU(s)", flush=True)
 
     if n_gpus > 1:
         launch = [
@@ -140,8 +166,30 @@ def main() -> None:
     if args.resume:
         launch += ["--resume", args.resume]
 
+    training_proc: subprocess.Popen | None = None
     try:
-        subprocess.run(launch, check=True)
+        training_proc = subprocess.Popen(launch)
+
+        # Prepare remaining phases in background while training runs
+        if remaining_phases:
+            t = threading.Thread(
+                target=_prepare_remaining,
+                args=(remaining_phases, encoding),
+                daemon=True,
+            )
+            t.start()
+
+        def _on_signal(sig, frame):
+            if training_proc and training_proc.poll() is None:
+                training_proc.terminate()
+            sys.exit(1)
+
+        signal.signal(signal.SIGINT, _on_signal)
+        signal.signal(signal.SIGTERM, _on_signal)
+
+        rc = training_proc.wait()
+        if rc != 0:
+            sys.exit(rc)
     finally:
         Path(tmp_config).unlink(missing_ok=True)
 

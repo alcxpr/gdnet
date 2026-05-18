@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pynvml
 import torch
 import torch._functorch.config
+import watchfiles
 import yaml
 from rich.columns import Columns
 from rich.console import Console
@@ -148,7 +149,6 @@ def _gpu_table(handles: list) -> Table:
     return t
 
 
-
 class TrainingMonitor:
     _MAX_ROWS = 15
 
@@ -177,7 +177,15 @@ class TrainingMonitor:
     def tick(self, step: int) -> None:
         self._step = step
 
-    def log(self, step: int, loss: float, lr: float, tps: float, ms: float, tok_per_step: int) -> None:
+    def log(
+        self,
+        step: int,
+        loss: float,
+        lr: float,
+        tps: float,
+        ms: float,
+        tok_per_step: int,
+    ) -> None:
         self._step = step
         self._rows.append((step, loss, lr, tps, ms, tok_per_step))
         if len(self._rows) > self._MAX_ROWS:
@@ -196,7 +204,14 @@ class TrainingMonitor:
         t.add_column("tok/step", justify="right")
         t.add_column("ms/step", justify="right")
         for step, loss, lr, tps, ms, tpst in self._rows:
-            t.add_row(str(step), f"{loss:.4f}", f"{lr:.2e}", f"{tps:,.0f}", f"{tpst:,}", f"{ms:.1f}")
+            t.add_row(
+                str(step),
+                f"{loss:.4f}",
+                f"{lr:.2e}",
+                f"{tps:,.0f}",
+                f"{tpst:,}",
+                f"{ms:.1f}",
+            )
         return t
 
     def _render(self) -> Columns:
@@ -218,7 +233,7 @@ class CudaPrefetcher:
     transfer is already done.
     """
 
-    def __init__(self, loader, device: torch.device) -> None:
+    def __init__(self, loader, device: torch.device) -> None:  # type: ignore
         self._loader = loader
         self._device = device
         self._stream = torch.cuda.Stream(device)
@@ -245,6 +260,20 @@ class CudaPrefetcher:
             raise StopIteration
         self._preload()
         return batch
+
+
+def _wait_for_file(path: str, rank: int) -> None:
+    """Block until path exists, using inotify on its parent directory."""
+    p = Path(path)
+    if p.exists():
+        return
+    if rank == 0:
+        print(f"[data] waiting for {path} ...", flush=True)
+    for _ in watchfiles.watch(
+        str(p.parent), yield_on_timeout=True, rust_timeout=60_000
+    ):
+        if p.exists():
+            break
 
 
 def make_dataset(
@@ -356,7 +385,7 @@ def main() -> None:
     if precision in ("bf16", "fp8"):
         for mod in model.modules():
             if isinstance(mod, torch.nn.RMSNorm):
-                mod.weight.data = mod.weight.data.to(torch.bfloat16)
+                mod.weight.data = mod.weight.data.to(torch.bfloat16)  # type: ignore
 
     if precision == "fp8":
         convert_to_fp8(model)
@@ -440,6 +469,8 @@ def main() -> None:
                         f"{source}  seq_len={T}  B={B}  steps {phase_start}-{phase_end}"
                     )
 
+                if phase.get("path"):
+                    _wait_for_file(phase["path"], rank)
                 ds = make_dataset(phase, cfg)
                 loader = DataLoader(
                     ds,
@@ -498,7 +529,7 @@ def main() -> None:
                         monitor.log(  # type: ignore
                             step,
                             loss,
-                            scheduler.get_last_lr()[0],
+                            scheduler.get_last_lr()[0],  # type: ignore
                             B * T / dt,
                             dt * 1000,
                             B * T,
