@@ -5,8 +5,11 @@ description = "Reference implementation and utilities for GDNet"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "datasets>=4.8.5",
     "nvidia-ml-py==13.595.45",
+    "pyyaml>=6.0",
     "rich==15.0.0",
+    "tiktoken>=0.13.0",
     "torch==2.8.0",
     "torchao==0.17.0",
 ]

@@ -1,0 +1,65 @@
+vocab_size: 100277
+d_embed: 512
+d: 1024
+n_layers: 8
+n_cycles: 2
+kernel_size: 7
+n_slots: 32
+
+tokenizer: cl100k_base
+token_budget: 32768
+seed: 42
+
+lr: 3.0e-4
+min_lr_ratio: 0.1
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.95
+grad_clip: 1.0
+beta_proj: 0.1
+
+warmup_steps: 2000
+decay_start: 800000
+
+# Sequential curriculum. Each phase runs for `steps` steps then the next begins.
+# dataset: fineweb-edu | nemotron
+# subset: HF config name passed directly to load_dataset (e.g. sample-10BT, everything)
+# int_score filters are FineWeb-Edu only (5=high, 3-4=medium)
+# min_chars is Nemotron only (char-count pre-filter, 0 = disabled)
+phases:
+    - dataset: fineweb-edu
+      subset: sample-10BT
+      seq_len: 8192
+      min_int_score: 5
+      max_int_score: 5
+      steps: 200000
+    - dataset: fineweb-edu
+      subset: sample-10BT
+      seq_len: 8192
+      min_int_score: 3
+      max_int_score: 4
+      steps: 200000
+    - dataset: fineweb-edu
+      subset: sample-10BT
+      seq_len: 16384
+      min_int_score: 5
+      max_int_score: 5
+      steps: 200000
+
+    - dataset: nemotron
+      subset: everything
+      seq_len: 8192
+      min_chars: 0
+      steps: 400000
+
+cam_start: 10000
+trans_start: 20000
+n_write: 4
+
+precision: bf16
+compile: false
+
+ckpt_dir: checkpoints
+ckpt_every: 1000
+resume: null
+log_every: 10

@@ -36,7 +36,13 @@ torch.set_float32_matmul_precision("high")
 from gdnet.layer import freeze_sn_iteration
 from gdnet.loss import projected_step
 from gdnet.model import GDNet
-from gdnet.utils.distributed import destroy, init_distributed, is_main_process
+from gdnet.utils.distributed import (
+    destroy,
+    get_sp_group,
+    get_world_size,
+    init_distributed,
+    is_main_process,
+)
 from gdnet.utils.fp8 import Precision, convert_to_fp8
 
 VOCAB_SIZE = 100_000
@@ -58,6 +64,12 @@ CONFIGS = [
     (8, 8192),
     (16, 8192),
     (32, 8192),
+    (128, 512),
+    (256, 512),
+    (512, 512),
+    (512, 1024),
+    (1024, 1024),
+    (2048, 2048),
 ]
 
 
@@ -293,10 +305,9 @@ def main() -> None:
             return
 
     init_distributed()
-    rank = dist.get_rank() if dist.is_initialized() else 0
-    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    world_size = get_world_size()
     local_rank = int(__import__("os").environ.get("LOCAL_RANK", 0))
-    sp_group = dist.group.WORLD if dist.is_initialized() else None
+    sp_group = get_sp_group()
     compile_flag = args.compile
     cam_modes = [True, False] if args.cam == "both" else [args.cam == "on"]
 

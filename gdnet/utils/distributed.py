@@ -168,6 +168,11 @@ def is_main_process() -> bool:
     return get_rank() == 0
 
 
+def get_sp_group() -> dist.ProcessGroup | None:
+    """Return the world process group for sequence parallelism, or None if single-process."""
+    return dist.group.WORLD if dist.is_initialized() else None
+
+
 def barrier() -> None:
     """Block until all ranks reach this point. No-op if not distributed."""
     if dist.is_initialized():

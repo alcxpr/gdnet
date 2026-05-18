@@ -73,6 +73,7 @@ def projected_step(
     precision: Precision = "bf16",
     write_chunks: torch.Tensor | None = None,
     sp_group: dist.ProcessGroup | None = None,
+    grad_clip: float = 0.0,
 ) -> float:
     """Single training step with projected gradient optimization.
 
@@ -181,8 +182,12 @@ def projected_step(
                 dist.all_reduce(p.grad)
                 p.grad /= world_size
 
+    if grad_clip > 0.0:
+        if scaler:
+            scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(params, grad_clip)
+
     if scaler:
-        scaler.unscale_(optimizer)
         scaler.step(optimizer)
         scaler.update()
     else:
