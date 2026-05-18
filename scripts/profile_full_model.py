@@ -76,7 +76,7 @@ def run(
 ) -> None:
     main_proc = is_main_process()
     T_local = T // world_size
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"cuda:{local_rank}")  # type: ignore
 
     model = make_model(T_local)
     if precision == "fp8":
@@ -85,6 +85,7 @@ def run(
         model = DDP(model, device_ids=[local_rank], static_graph=True)  # type: ignore
     if compile_model:
         torch._functorch.config.donated_buffer = False
+        torch._dynamo.config.allow_unspec_int_on_nn_module = True
         model = torch.compile(model)  # type: ignore
 
     base_model: GDNet = getattr(model, "module", model)  # type: ignore
@@ -92,10 +93,10 @@ def run(
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)  # type: ignore
     params = list(model.parameters())  # type: ignore
 
-    tokens = torch.randint(0, VOCAB_SIZE, (B, T_local), device=device)
-    targets = torch.randint(0, VOCAB_SIZE, (B, T_local), device=device)
+    tokens = torch.randint(0, VOCAB_SIZE, (B, T_local), device=device)  # type: ignore
+    targets = torch.randint(0, VOCAB_SIZE, (B, T_local), device=device)  # type: ignore
     write_chunks = (
-        torch.randint(0, VOCAB_SIZE, (B, N_WRITE, T_local), device=device)
+        torch.randint(0, VOCAB_SIZE, (B, N_WRITE, T_local), device=device)  # type: ignore
         if base_model.cam_enabled
         else None
     )

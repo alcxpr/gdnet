@@ -11,6 +11,25 @@ from .utils.fp8 import Precision
 from .utils.fp8 import autocast as make_autocast
 
 
+def sn_soft_penalty(layers: list, scale: float = 0.1) -> torch.Tensor:
+    """Soft spectral norm penalty across all gate W1 matrices.
+
+    Replaces hard SN constraint with a differentiable penalty: relu(sigma - 1)^2
+    summed over all gate weight matrices, estimated via one power iteration step.
+    Operates in float32 regardless of training precision for numerical stability.
+    """
+    device = next(layers[0].parameters()).device
+    acc = torch.zeros((), device=device, dtype=torch.float32)
+    for layer in layers:
+        for attr in ("gf_W1", "gb_W1", "rf_W1", "rb_W1"):
+            W = getattr(layer, attr).weight.float()
+            v = torch.randn(W.shape[1], device=device, dtype=torch.float32).detach()
+            v = v / v.norm()
+            sigma = (W @ v).norm()
+            acc = acc + torch.relu(sigma - 1.0).pow(2)
+    return scale * acc
+
+
 def gate_info_loss_from_vals(
     gate_vals: list[torch.Tensor],
     n_layers: int,
@@ -133,6 +152,8 @@ def projected_step(
     optimizer.zero_grad()
     with make_autocast(precision):  # type: ignore
         loss_info_base = gate_info_loss_from_vals(gate_vals, base_model.n_layers)  # type: ignore
+        if base_model.layers:
+            loss_info_base = loss_info_base + sn_soft_penalty(base_model.layers)
         if base_model.cam_enabled:
             loss_info_base = loss_info_base + 0.1 * base_model.cam.recon_loss(  # type: ignore
                 side[0].mean(dim=1)
@@ -162,8 +183,8 @@ def projected_step(
         for p in params
     ]
 
-    denom = torch.tensor(0.0, device=params[0].device, dtype=torch.float32)  # type: ignore
-    proj_coef_num = torch.tensor(0.0, device=params[0].device, dtype=torch.float32)  # type: ignore
+    denom = torch.zeros((), device=params[0].device, dtype=torch.float32)  # type: ignore
+    proj_coef_num = torch.zeros((), device=params[0].device, dtype=torch.float32)  # type: ignore
     for gt, gi in zip(g_task, g_info):
         denom += gt.float().pow(2).sum()
         proj_coef_num += (gi.float() * gt.float()).sum()

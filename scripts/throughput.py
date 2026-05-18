@@ -233,6 +233,7 @@ def run_config(
 
     if compile_model:
         torch._functorch.config.donated_buffer = False
+        torch._dynamo.config.allow_unspec_int_on_nn_module = True
         model = torch.compile(model)  # type: ignore
 
     base_model: GDNet = getattr(model, "module", model)  # type: ignore

@@ -14,13 +14,6 @@ from .kernel.gated_causal_depthwise_conv import (
 )
 from .utils.sp import SPHaloExchange
 
-_SN_PREFIXES = ("gf", "gb", "rf", "rb")
-
-
-def _sync_sn(m: nn.Module) -> None:
-    for hook in m._forward_pre_hooks.values():
-        hook(m, None)
-
 
 @contextmanager
 def freeze_sn_iteration(module: nn.Module) -> Generator[None, None, None]:
@@ -99,7 +92,8 @@ class GDLayer(nn.Module):
         self.conv_bwd = CausalDepthWiseConv1d(d, size)
 
         for prefix in ["gf", "gb"]:
-            W1 = nn.utils.spectral_norm(nn.Linear(d, d))
+            W1 = nn.Linear(d, d)
+            nn.init.orthogonal_(W1.weight)
             W2 = nn.Linear(d, d)
             norm = nn.RMSNorm(d)
             nn.init.normal_(W2.weight, std=0.01)
@@ -109,7 +103,8 @@ class GDLayer(nn.Module):
             setattr(self, f"{prefix}_norm", norm)
 
         for prefix in ["rf", "rb"]:
-            W1 = nn.utils.spectral_norm(nn.Linear(d * 2, d))
+            W1 = nn.Linear(d * 2, d)
+            nn.init.orthogonal_(W1.weight)
             W2 = nn.Linear(d, d)
             norm = nn.RMSNorm(d)
             nn.init.normal_(W2.weight, std=0.01)
@@ -175,7 +170,6 @@ class GDLayer(nn.Module):
         B, T, d = fwd.shape
         conv_3d, conv_flat = self._conv_flat(fwd, self.conv_fwd)
         R = self._recovery("rf", side, conv_3d.to(fwd.dtype))
-        _sync_sn(self.gf_W1)  # type: ignore
         fwd_out, side_out = gated_output(
             conv_flat,
             side,
@@ -215,7 +209,6 @@ class GDLayer(nn.Module):
         B, T, d = fwd.shape
         conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_fwd, sp_group)
         R = self._recovery("rf", side, conv_3d.to(fwd.dtype))
-        _sync_sn(self.gf_W1)  # type: ignore
         fwd_out, side_out = gated_output(
             conv_flat,
             side,
@@ -242,7 +235,6 @@ class GDLayer(nn.Module):
         B, T, d = fwd.shape
         conv_3d, conv_flat = self._conv_flat(fwd, self.conv_bwd)
         R = self._recovery("rb", side, conv_3d.to(fwd.dtype))
-        _sync_sn(self.gb_W1)  # type: ignore
         fwd_out, side_out = gated_output(
             conv_flat,
             side,
@@ -274,7 +266,6 @@ class GDLayer(nn.Module):
         B, T, d = fwd.shape
         conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_bwd, sp_group)
         R = self._recovery("rb", side, conv_3d.to(fwd.dtype))
-        _sync_sn(self.gb_W1)  # type: ignore
         fwd_out, side_out = gated_output(
             conv_flat,
             side,
