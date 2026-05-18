@@ -34,7 +34,7 @@ from rich.table import Table
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
-from gdnet.data import FineWebEduDataset, NemotronDataset
+from gdnet.data import FineWebEduDataset, NemotronDataset, PackedTokenDataset
 from gdnet.layer import freeze_sn_iteration
 from gdnet.loss import projected_step
 from gdnet.model import GDNet
@@ -208,11 +208,56 @@ class TrainingMonitor:
             self._stop.wait(0.5)
 
 
+class CudaPrefetcher:
+    """Overlaps H2D transfer of the next batch with the current step's GPU compute.
+
+    Wraps any DataLoader. Uses a dedicated CUDA stream so the transfer runs
+    concurrently with the default stream's forward/backward. The main thread
+    calls wait_stream before using the batch, which costs nothing when the
+    transfer is already done.
+    """
+
+    def __init__(self, loader, device: torch.device) -> None:
+        self._loader = loader
+        self._device = device
+        self._stream = torch.cuda.Stream(device)
+        self._next: torch.Tensor | None = None
+        self._iter = iter(loader)
+        self._preload()
+
+    def _preload(self) -> None:
+        try:
+            batch = next(self._iter)
+        except StopIteration:
+            self._next = None
+            return
+        with torch.cuda.stream(self._stream):
+            self._next = batch.to(self._device, non_blocking=True)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> torch.Tensor:
+        torch.cuda.current_stream(self._device).wait_stream(self._stream)
+        batch = self._next
+        if batch is None:
+            raise StopIteration
+        self._preload()
+        return batch
+
+
 def make_dataset(
     phase: dict[str, Any], cfg: Config
 ) -> torch.utils.data.IterableDataset:
     source = phase.get("dataset", "fineweb-edu")
     seq_len = phase["seq_len"]
+
+    path = phase.get("path")
+    if path and Path(path).exists():
+        return PackedTokenDataset(paths=path, seq_len=seq_len)
+
+    if source == "packed":
+        raise FileNotFoundError(f"packed dataset not found: {path}")
 
     if source == "fineweb-edu":
         return FineWebEduDataset(
@@ -403,10 +448,11 @@ def main() -> None:
                     prefetch_factor=2 if cfg.num_data_workers > 0 else None,
                     persistent_workers=cfg.num_data_workers > 0,
                 )
+                prefetcher = CudaPrefetcher(loader, device)
                 write_buf: deque[torch.Tensor] = deque(maxlen=cfg.n_write)
                 t0 = time.perf_counter()
 
-                for batch in loader:
+                for seq in prefetcher:
                     if step >= phase_end:
                         break
 
@@ -415,7 +461,6 @@ def main() -> None:
                     if step == cfg.trans_start and not base_model.trans_enabled:
                         base_model.trans_enabled = True
 
-                    seq = batch.to(device, non_blocking=True)
                     tokens = seq[:, :-1][:, rank * T_local : (rank + 1) * T_local]
                     targets = seq[:, 1:][:, rank * T_local : (rank + 1) * T_local]
 
