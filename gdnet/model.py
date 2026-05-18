@@ -50,17 +50,19 @@ class GDNet(nn.Module):
         d_c = d_c or d // 4
         d_sig = d_sig or d // 8
 
-        self.embed = nn.Embedding(vocab_size, d_embed)
+        vocab_size_padded = vocab_size + (-vocab_size % 16)
+        self.embed = nn.Embedding(vocab_size_padded, d_embed)
         self.proj_in = nn.Linear(d_embed, d, bias=False)
         self.layers = nn.ModuleList([GDLayer(d, kernel_size) for _ in range(n_layers)])
         self.proj_out = nn.Linear(d, d_embed, bias=False)
-        self.head = nn.Linear(d_embed, vocab_size, bias=False)
+        self.head = nn.Linear(d_embed, vocab_size_padded, bias=False)
         self.head.weight = self.embed.weight
 
         self.cam = CAM(d, d_c, d_sig, n_slots, chunk_size)
         self.trans_ops = TransitionOperators(d, n_ops)
         self.norm_out = nn.RMSNorm(d)
 
+        self.vocab_size = vocab_size
         self.d = d
         self.d_embed = d_embed
         self.n_layers = n_layers
@@ -174,7 +176,7 @@ class GDNet(nn.Module):
         if self.cam_enabled:
             fwd, cam_weights = self.cam.read(fwd, side[0], buffer_tags, buffer_vals)
 
-        logits = self.head(self.proj_out(self.norm_out(fwd)))
+        logits = self.head(self.proj_out(self.norm_out(fwd)))[..., :self.vocab_size]
         return logits, side, buffer_tags, buffer_vals, gate_vals, cam_weights, fwd_last
 
     def write_cam(

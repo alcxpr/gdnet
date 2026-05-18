@@ -4,17 +4,18 @@ Auto-detects GPU count, derives tokenized file paths from phase metadata,
 runs prepare_data.py for any missing files, then hands off to training.py.
 
 Usage:
-    python scripts/run.py                              # all defaults
-    python scripts/run.py --gpus 2                     # force 2 GPUs
-    python scripts/run.py --data-dir /data/tokenized   # custom data dir
+    python scripts/run.py                                    # all defaults
+    python scripts/run.py --gpus 2                           # force 2 GPUs
+    python scripts/run.py --data-dir /data/tokenized         # custom data dir
     python scripts/run.py --config configs/training.yaml --gpus 4
-    python scripts/run.py --skip-prepare               # assume data exists
+    python scripts/run.py --skip-prepare                     # assume data ready
+    python scripts/run.py --prepare-only                     # tokenize, don't train
+    python scripts/run.py --resume checkpoints/step_1000.pt  # resume checkpoint
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 import tempfile
@@ -69,6 +70,8 @@ def main() -> None:
     parser.add_argument("--gpus", type=int, default=None)
     parser.add_argument("--data-dir", default=str(ROOT / "data" / "tokenized"))
     parser.add_argument("--skip-prepare", action="store_true")
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--resume", default=None, help="path to checkpoint to resume from")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -103,6 +106,10 @@ def main() -> None:
             cmd = _prepare_cmd(phase, path, encoding)
             subprocess.run(cmd, check=True)
 
+    if args.prepare_only:
+        print("[run] --prepare-only: data ready, exiting.")
+        return
+
     # Write a temp config with paths filled in
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", delete=False, dir=ROOT
@@ -130,8 +137,11 @@ def main() -> None:
             "--config", tmp_config,
         ]
 
+    if args.resume:
+        launch += ["--resume", args.resume]
+
     try:
-        os.execvp(launch[0], launch)
+        subprocess.run(launch, check=True)
     finally:
         Path(tmp_config).unlink(missing_ok=True)
 
