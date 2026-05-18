@@ -114,7 +114,7 @@ def projected_step(
         logits, side, _, _, gate_vals, _, _ = model(
             tokens, btags, bvals, return_gates=True, sp_group=sp_group
         )
-        loss_task = F.cross_entropy(logits.view(-1, logits.shape[-1]), targets.view(-1))
+        loss_task = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1))
 
     base_model = getattr(model, "module", model)
     no_sync = getattr(model, "no_sync", contextlib.nullcontext)

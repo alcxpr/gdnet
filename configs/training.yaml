@@ -56,8 +56,8 @@ cam_start: 10000
 trans_start: 20000
 n_write: 4
 
-precision: bf16
-compile: false
+precision: fp8
+compile: true
 
 ckpt_dir: checkpoints
 ckpt_every: 1000
