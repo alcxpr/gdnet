@@ -49,16 +49,17 @@ def build_cam_buffer(
     Returns:
         `(buffer_tags, buffer_vals)` ready to pass into `model.forward`.
     """
+    raw = getattr(model, "module", model)
     B, n_write, _ = write_chunks.shape
     device = write_chunks.device
-    btags = torch.zeros(B, model.cam.n_slots, model.cam.d_sig, device=device)  # type: ignore
-    bvals = torch.zeros(B, model.cam.n_slots, model.cam.d_c, device=device)  # type: ignore
+    btags = torch.zeros(B, raw.cam.n_slots, raw.cam.d_sig, device=device)  # type: ignore
+    bvals = torch.zeros(B, raw.cam.n_slots, raw.cam.d_c, device=device)  # type: ignore
     with torch.no_grad():
         for i in range(n_write):
             _, side, _, _, _, _, fwd_last = model(
                 write_chunks[:, i], btags, bvals, sp_group=sp_group
             )
-            btags, bvals = model.write_cam(fwd_last, side, btags, bvals)  # type: ignore
+            btags, bvals = raw.write_cam(fwd_last, side, btags, bvals)  # type: ignore
     return btags, bvals
 
 
@@ -105,10 +106,11 @@ def projected_step(
         Task loss value for this step.
     """
     optimizer.zero_grad()
+    base_model = getattr(model, "module", model)
     with make_autocast(precision):  # type: ignore
         btags, bvals = (
             build_cam_buffer(model, write_chunks, sp_group=sp_group)
-            if write_chunks is not None and model.cam_enabled  # type: ignore
+            if write_chunks is not None and base_model.cam_enabled  # type: ignore
             else (None, None)
         )
         logits, side, _, _, gate_vals, _, _ = model(
@@ -116,7 +118,6 @@ def projected_step(
         )
         loss_task = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1))
 
-    base_model = getattr(model, "module", model)
     no_sync = getattr(model, "no_sync", contextlib.nullcontext)
 
     with no_sync():
@@ -149,7 +150,7 @@ def projected_step(
             _, side2, _, _, _, _, _ = model(tokens[:, mid:], sp_group=sp_group)
             z_t = side1[0].mean(dim=1)
             z_t1 = side2[0].mean(dim=1).detach()
-            loss_trans = 0.1 * model.trans_ops.loss(z_t, z_t1)  # type: ignore
+            loss_trans = 0.1 * base_model.trans_ops.loss(z_t, z_t1)  # type: ignore
         with no_sync():
             if scaler:
                 scaler.scale(loss_trans).backward()
