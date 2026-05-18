@@ -16,22 +16,21 @@ class FusedMemReadFunction(torch.autograd.Function):
         buffer_vals: torch.Tensor,
         alpha: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        dtype = q.dtype
         alpha_f = float(alpha.item())
 
-        q_f = q.float().contiguous()
-        gamma_f = gamma.float().contiguous()
-        e_f = e.float().contiguous()
-        btags_f = buffer_tags.float().contiguous()
-        bvals_f = buffer_vals.float().contiguous()
+        q_c = q.contiguous()
+        gamma_c = gamma.contiguous()
+        e_c = e.contiguous()
+        btags_c = buffer_tags.contiguous()
+        bvals_c = buffer_vals.contiguous()
 
         retrieved_c, w = fused_mem_read_fwd(
-            q_f, gamma_f, e_f, btags_f, bvals_f, alpha_f
+            q_c, gamma_c, e_c, btags_c, bvals_c, alpha_f
         )
 
-        ctx.save_for_backward(q_f, gamma_f, e_f, btags_f, bvals_f, w, alpha)
-        ctx.dtype = dtype
-        return retrieved_c.to(dtype), w
+        ctx.save_for_backward(q_c, gamma_c, e_c, btags_c, bvals_c, w, alpha)
+        ctx.dtype = q.dtype
+        return retrieved_c, w
 
     @staticmethod
     def backward(  # type: ignore
@@ -43,7 +42,7 @@ class FusedMemReadFunction(torch.autograd.Function):
         alpha_f = float(alpha.item())
 
         d_q, d_gamma, d_alpha_per_b, d_sim, d_btags, d_bvals = fused_mem_read_bwd(
-            d_retrieved_c.float().contiguous(),
+            d_retrieved_c.contiguous(),
             q_f,
             gamma_f,
             e_f,
@@ -54,16 +53,16 @@ class FusedMemReadFunction(torch.autograd.Function):
         )
 
         # d_e needs a reduction over B; one matmul, no atomics
-        d_e = alpha_f * (d_sim.t() @ gamma_f)
+        d_e = alpha_f * (d_sim.t() @ gamma_f.float())
         d_alpha = d_alpha_per_b.sum().reshape_as(alpha)
 
         dtype = ctx.dtype
         return (
-            d_q.to(dtype),
-            d_gamma.to(dtype),
+            d_q,
+            d_gamma,
             d_e.to(dtype),
-            d_btags.to(dtype),
-            d_bvals.to(dtype),
+            d_btags,
+            d_bvals,
             d_alpha,
         )
 

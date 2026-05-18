@@ -199,15 +199,15 @@ def fused_mem_read_fwd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
-        q: Content query `(B, d_sig)` float32 contiguous, d_sig must be a power of 2.
-        gamma: Position query `(B, d_sig)` float32 contiguous.
-        e: Slot embeddings `(n_slots, d_sig)` float32 contiguous.
-        buffer_tags: Stored content tags `(B, n_slots, d_sig)` float32 contiguous.
-        buffer_vals: Stored compressed values `(B, n_slots, d_c)` float32 contiguous, d_c must be a power of 2.
+        q: Content query `(B, d_sig)` contiguous, d_sig must be a power of 2.
+        gamma: Position query `(B, d_sig)` contiguous.
+        e: Slot embeddings `(n_slots, d_sig)` contiguous.
+        buffer_tags: Stored content tags `(B, n_slots, d_sig)` contiguous.
+        buffer_vals: Stored compressed values `(B, n_slots, d_c)` contiguous, d_c must be a power of 2.
         alpha: Scalar weight for the position term.
 
     Returns:
-        retrieved_c `(B, d_c)` float32 and w `(B, n_slots)` float32.
+        retrieved_c `(B, d_c)` in q.dtype and w `(B, n_slots)` float32.
     """
     B, d_sig = q.shape
     n_slots = e.shape[0]
@@ -216,7 +216,7 @@ def fused_mem_read_fwd(
     assert d_sig % BLOCK_DSIG == 0, f"d_sig={d_sig} must be a power of 2"
     assert d_c % BLOCK_DC == 0, f"d_c={d_c} must be a power of 2"
     w = torch.empty(B, n_slots, dtype=torch.float32, device=q.device)  # type: ignore
-    retrieved_c = torch.empty(B, d_c, dtype=torch.float32, device=q.device)  # type: ignore
+    retrieved_c = torch.empty(B, d_c, dtype=q.dtype, device=q.device)  # type: ignore
     _fused_mem_read_fwd_kernel[(B,)](
         q,
         gamma,
@@ -252,12 +252,12 @@ def fused_mem_read_bwd(
 ]:
     """
     Args:
-        d_retrieved_c: Upstream gradient `(B, d_c)` float32 contiguous.
-        q: Content query `(B, d_sig)` float32 contiguous.
-        gamma: Position query `(B, d_sig)` float32 contiguous.
-        e: Slot embeddings `(n_slots, d_sig)` float32 contiguous.
-        buffer_tags: Stored content tags `(B, n_slots, d_sig)` float32 contiguous.
-        buffer_vals: Stored compressed values `(B, n_slots, d_c)` float32 contiguous.
+        d_retrieved_c: Upstream gradient `(B, d_c)` contiguous.
+        q: Content query `(B, d_sig)` contiguous.
+        gamma: Position query `(B, d_sig)` contiguous.
+        e: Slot embeddings `(n_slots, d_sig)` contiguous.
+        buffer_tags: Stored content tags `(B, n_slots, d_sig)` contiguous.
+        buffer_vals: Stored compressed values `(B, n_slots, d_c)` contiguous.
         w: Retrieval weights from forward `(B, n_slots)` float32 contiguous.
         alpha: Scalar weight for the position term.
 
