@@ -43,7 +43,7 @@ def _derive_path(phase: dict, data_dir: Path) -> str | None:
     return None
 
 
-def _prepare_cmd(phase: dict, path: str, encoding: str) -> list[str]:
+def _prepare_cmd(phase: dict, path: str, encoding: str, no_streaming: bool = False) -> list[str]:
     source = phase.get("dataset", "fineweb-edu")
     cmd = [
         sys.executable,
@@ -64,10 +64,12 @@ def _prepare_cmd(phase: dict, path: str, encoding: str) -> list[str]:
             "--subset", phase.get("subset", "everything"),
             "--min-chars", str(phase.get("min_chars", 0)),
         ]
+    if no_streaming:
+        cmd += ["--no-streaming"]
     return cmd
 
 
-def _prepare_phase(phase: dict, encoding: str) -> None:
+def _prepare_phase(phase: dict, encoding: str, no_streaming: bool = False) -> None:
     path = phase.get("path")
     if not path:
         return
@@ -83,10 +85,10 @@ def _prepare_phase(phase: dict, encoding: str) -> None:
     if source not in ("fineweb-edu", "nemotron"):
         return
     print(f"[data] preparing {path} ...", flush=True)
-    subprocess.run(_prepare_cmd(phase, path, encoding), check=True)
+    subprocess.run(_prepare_cmd(phase, path, encoding, no_streaming), check=True)
 
 
-def _prepare_remaining(phases: list[dict], encoding: str) -> None:
+def _prepare_remaining(phases: list[dict], encoding: str, no_streaming: bool = False) -> None:
     seen: set[str] = set()
     for phase in phases:
         path = phase.get("path") or ""
@@ -94,7 +96,7 @@ def _prepare_remaining(phases: list[dict], encoding: str) -> None:
             continue
         seen.add(path)
         try:
-            _prepare_phase(phase, encoding)
+            _prepare_phase(phase, encoding, no_streaming)
         except Exception as e:
             print(f"[data] ERROR preparing {path}: {e}", flush=True)
 
@@ -106,6 +108,7 @@ def main() -> None:
     parser.add_argument("--data-dir", default=str(ROOT / "data" / "tokenized"))
     parser.add_argument("--skip-prepare", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--no-streaming", action="store_true", help="download dataset before tokenizing")
     parser.add_argument("--resume", default=None, help="path to checkpoint to resume from")
     args = parser.parse_args()
 
@@ -134,11 +137,11 @@ def main() -> None:
                 unique_phases.append(phase)
 
         # Prepare the first phase synchronously so training can start immediately
-        _prepare_phase(unique_phases[0], encoding)
+        _prepare_phase(unique_phases[0], encoding, args.no_streaming)
         remaining_phases = unique_phases[1:]
 
     if args.prepare_only:
-        _prepare_remaining(remaining_phases, encoding)
+        _prepare_remaining(remaining_phases, encoding, args.no_streaming)
         print("[run] --prepare-only: all data ready, exiting.")
         return
 
@@ -178,7 +181,7 @@ def main() -> None:
         if remaining_phases:
             t = threading.Thread(
                 target=_prepare_remaining,
-                args=(remaining_phases, encoding),
+                args=(remaining_phases, encoding, args.no_streaming),
                 daemon=True,
             )
             t.start()

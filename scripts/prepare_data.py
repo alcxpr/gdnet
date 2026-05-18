@@ -59,14 +59,16 @@ def _chunk(it, size: int):
         yield batch
 
 
-def _stream_fineweb(subset: str, min_score: int, max_score: int, min_token_count: int):
+def _stream_fineweb(
+    subset: str, min_score: int, max_score: int, min_token_count: int, streaming: bool = True
+):
     from datasets import load_dataset  # type: ignore
 
     ds = load_dataset(
         "HuggingFaceFW/fineweb-edu",
         name=subset,
         split="train",
-        streaming=True,
+        streaming=streaming,
     )
     for sample in ds:
         if not (min_score <= sample["int_score"] <= max_score):
@@ -76,7 +78,7 @@ def _stream_fineweb(subset: str, min_score: int, max_score: int, min_token_count
         yield sample["text"]
 
 
-def _stream_nemotron(subset: str, min_chars: int):
+def _stream_nemotron(subset: str, min_chars: int, streaming: bool = True):
     from datasets import load_dataset  # type: ignore
 
     repo = "nvidia/Nemotron-Pretraining-Specialized-v1.1"
@@ -85,10 +87,10 @@ def _stream_nemotron(subset: str, min_chars: int):
 
         configs = get_dataset_config_names(repo)
         ds = concatenate_datasets(
-            [load_dataset(repo, name=c, split="train", streaming=True) for c in configs]
+            [load_dataset(repo, name=c, split="train", streaming=streaming) for c in configs]
         )
     else:
-        ds = load_dataset(repo, name=subset, split="train", streaming=True)
+        ds = load_dataset(repo, name=subset, split="train", streaming=streaming)
 
     for sample in ds:
         text = sample["text"]
@@ -113,6 +115,11 @@ def main() -> None:
         default=max(1, (os.cpu_count() or 4) - 2),
         help="tokenizer worker processes (default: cpu_count - 2)",
     )
+    parser.add_argument(
+        "--no-streaming",
+        action="store_true",
+        help="download full dataset before tokenizing (faster on fast storage)",
+    )
     args = parser.parse_args()
 
     out_path = Path(args.out)
@@ -123,12 +130,13 @@ def main() -> None:
     import tiktoken
     eos = tiktoken.get_encoding(args.encoding).eot_token
 
+    streaming = not args.no_streaming
     if args.dataset == "fineweb-edu":
         text_iter = _stream_fineweb(
-            args.subset, args.min_score, args.max_score, args.min_token_count
+            args.subset, args.min_score, args.max_score, args.min_token_count, streaming
         )
     else:
-        text_iter = _stream_nemotron(args.subset, args.min_chars)
+        text_iter = _stream_nemotron(args.subset, args.min_chars, streaming)
 
     total_tokens = 0
     t0 = time.perf_counter()
