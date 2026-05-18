@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 
-_DOCS_PER_BATCH = 512
+_DOCS_PER_BATCH = 2048
 
 
 def _tokenize_batch(args: tuple[list[str], str, int]) -> list[int]:
@@ -59,6 +59,10 @@ def _chunk(it, size: int):
         yield batch
 
 
+_ITER_BATCH = 4096
+_FILTER_PROCS = min(32, (os.cpu_count() or 4))
+
+
 def _stream_fineweb(
     subset: str, min_score: int, max_score: int, min_token_count: int, streaming: bool = True
 ):
@@ -70,12 +74,22 @@ def _stream_fineweb(
         split="train",
         streaming=streaming,
     )
-    for sample in ds:
-        if not (min_score <= sample["int_score"] <= max_score):
-            continue
-        if sample["token_count"] < min_token_count:
-            continue
-        yield sample["text"]
+    if streaming:
+        for sample in ds:
+            if not (min_score <= sample["int_score"] <= max_score):
+                continue
+            if sample["token_count"] < min_token_count:
+                continue
+            yield sample["text"]
+    else:
+        ds = ds.filter(
+            lambda x: min_score <= x["int_score"] <= max_score
+            and x["token_count"] >= min_token_count,
+            num_proc=_FILTER_PROCS,
+            desc="filtering",
+        )
+        for batch in ds.iter(batch_size=_ITER_BATCH):
+            yield from batch["text"]
 
 
 def _stream_nemotron(subset: str, min_chars: int, streaming: bool = True):
@@ -92,11 +106,21 @@ def _stream_nemotron(subset: str, min_chars: int, streaming: bool = True):
     else:
         ds = load_dataset(repo, name=subset, split="train", streaming=streaming)
 
-    for sample in ds:
-        text = sample["text"]
-        if min_chars > 0 and len(text) < min_chars:
-            continue
-        yield text
+    if streaming:
+        for sample in ds:
+            text = sample["text"]
+            if min_chars > 0 and len(text) < min_chars:
+                continue
+            yield text
+    else:
+        if min_chars > 0:
+            ds = ds.filter(
+                lambda x: len(x["text"]) >= min_chars,
+                num_proc=_FILTER_PROCS,
+                desc="filtering",
+            )
+        for batch in ds.iter(batch_size=_ITER_BATCH):
+            yield from batch["text"]
 
 
 def main() -> None:
