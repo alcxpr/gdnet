@@ -57,7 +57,7 @@ trans_start: 20000
 n_write: 4
 
 precision: fp8
-compile: true
+compile: false
 
 ckpt_dir: checkpoints
 ckpt_every: 1000
