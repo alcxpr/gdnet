@@ -71,10 +71,14 @@ def _prepare_phase(phase: dict, encoding: str) -> None:
     path = phase.get("path")
     if not path:
         return
-    if Path(path).exists():
-        size_gb = Path(path).stat().st_size / 1024**3
+    p = Path(path)
+    if p.exists() and p.stat().st_size > 0:
+        size_gb = p.stat().st_size / 1024**3
         print(f"[data] found {path} ({size_gb:.2f} GB)", flush=True)
         return
+    if p.exists():
+        print(f"[data] removing empty/corrupt {path}", flush=True)
+        p.unlink()
     source = phase.get("dataset", "fineweb-edu")
     if source not in ("fineweb-edu", "nemotron"):
         return

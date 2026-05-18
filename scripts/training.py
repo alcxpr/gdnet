@@ -263,16 +263,16 @@ class CudaPrefetcher:
 
 
 def _wait_for_file(path: str, rank: int) -> None:
-    """Block until path exists, using inotify on its parent directory."""
+    """Block until path exists and is non-empty, using inotify on its parent directory."""
     p = Path(path)
-    if p.exists():
+    if p.exists() and p.stat().st_size > 0:
         return
     if rank == 0:
         print(f"[data] waiting for {path} ...", flush=True)
     for _ in watchfiles.watch(
         str(p.parent), yield_on_timeout=True, rust_timeout=60_000
     ):
-        if p.exists():
+        if p.exists() and p.stat().st_size > 0:
             break
 
 
