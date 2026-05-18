@@ -45,7 +45,7 @@ from gdnet.utils.distributed import (
 )
 from gdnet.utils.fp8 import Precision, convert_to_fp8
 
-VOCAB_SIZE = 100_000
+VOCAB_SIZE = 100_277
 N_WRITE = 4
 
 CONFIGS = [
@@ -198,6 +198,7 @@ def make_model(T_local: int) -> GDNet:
         d=2048,
         n_layers=8,
         n_cycles=2,
+        kernel_size=9,
         chunk_size=T_local,
     ).cuda()
 
