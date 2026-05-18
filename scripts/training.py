@@ -320,6 +320,7 @@ def main() -> None:
 
     if cfg.compile:
         torch._functorch.config.donated_buffer = False
+        torch._dynamo.config.optimize_ddp = False
         model = torch.compile(model, dynamic=True)  # type: ignore
 
     base_model: GDNet = getattr(model, "module", model)  # type: ignore
