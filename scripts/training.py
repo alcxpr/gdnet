@@ -172,6 +172,9 @@ class TrainingMonitor:
         self._phase = label
         self._rows.clear()
 
+    def tick(self, step: int) -> None:
+        self._step = step
+
     def log(self, step: int, loss: float, lr: float, tps: float, ms: float, tok_per_step: int) -> None:
         self._step = step
         self._rows.append((step, loss, lr, tps, ms, tok_per_step))
@@ -431,6 +434,9 @@ def main() -> None:
 
                     scheduler.step()
                     step += 1
+
+                    if main_proc:
+                        monitor.tick(step)  # type: ignore
 
                     if main_proc and step % cfg.log_every == 0:
                         dt = (time.perf_counter() - t0) / cfg.log_every
