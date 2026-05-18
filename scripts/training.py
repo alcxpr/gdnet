@@ -89,6 +89,7 @@ class Config:
     ckpt_every: int = 1_000
     resume: str | None = None
     log_every: int = 10
+    num_data_workers: int = 4
 
     @property
     def total_steps(self) -> int:
@@ -393,7 +394,14 @@ def main() -> None:
                     )
 
                 ds = make_dataset(phase, cfg)
-                loader = DataLoader(ds, batch_size=B, num_workers=0, pin_memory=True)
+                loader = DataLoader(
+                    ds,
+                    batch_size=B,
+                    num_workers=cfg.num_data_workers,
+                    pin_memory=True,
+                    prefetch_factor=2 if cfg.num_data_workers > 0 else None,
+                    persistent_workers=cfg.num_data_workers > 0,
+                )
                 write_buf: deque[torch.Tensor] = deque(maxlen=cfg.n_write)
                 t0 = time.perf_counter()
 

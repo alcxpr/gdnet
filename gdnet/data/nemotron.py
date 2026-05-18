@@ -40,6 +40,9 @@ class NemotronDataset(IterableDataset):
     def __iter__(self):
         from datasets import load_dataset  # type: ignore
 
+        worker_info = torch.utils.data.get_worker_info()
+        seed = self._seed + (worker_info.id if worker_info is not None else 0)
+
         enc = tiktoken.get_encoding(self._encoding)
         eos = enc.eot_token
         target_len = self._seq_len + 1
@@ -61,7 +64,7 @@ class NemotronDataset(IterableDataset):
         else:
             ds = load_dataset(repo, name=self._subset, split="train", streaming=True)
 
-        ds = ds.shuffle(seed=self._seed, buffer_size=self._buffer_size)
+        ds = ds.shuffle(seed=seed, buffer_size=self._buffer_size)
 
         buf: list[int] = []
         for sample in ds:
