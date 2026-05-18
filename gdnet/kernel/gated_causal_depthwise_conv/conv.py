@@ -96,16 +96,20 @@ def _causal_dwconv_bwd_kernel(
     ki_range = tl.arange(0, MAX_K)
     w = tl.load(W_ptr + ch * k + ki_range, mask=ki_range < k, other=0.0)
 
+    dw_accs = tl.zeros((MAX_K,), dtype=tl.float32)
     for t_base in range(0, T, BLOCK_T):
         t = t_base + tl.arange(0, BLOCK_T)
         t_mask = t < T
+
+        # dX: 2D load covers [t_base, t_base+BLOCK_T+k-2] of dOUT.
+        # The ki=k-1 row is exactly dOUT[t], so the dW load below is an L1 hit.
         t_prime = t[None, :] + (k - 1) - ki_range[:, None]
-        valid = (
+        valid_tp = (
             t_mask[None, :] & (t_prime >= 0) & (t_prime < T) & (ki_range < k)[:, None]
         )
         d_outs = tl.load(
             dOUT_ptr + b * stride_b + t_prime * stride_t + ch * stride_d,
-            mask=valid,
+            mask=valid_tp,
             other=0.0,
         )
         tl.store(
@@ -114,35 +118,7 @@ def _causal_dwconv_bwd_kernel(
             mask=t_mask,
         )
 
-    # dHALO[t_h] = sum_{t'=0}^{t_h} d_out[t'] * w[t_h - t']
-    # Only the first k-1 output positions feed into halo grads.
-    if USE_HALO:
-        t_prime_h = ki_range  # shape (MAX_K,), mask to [0, k-2]
-        t_prime_h_mask = t_prime_h < tl.minimum(k - 1, T)
-        d_out_h = tl.load(
-            dOUT_ptr + b * stride_b + t_prime_h * stride_t + ch * stride_d,
-            mask=t_prime_h_mask,
-            other=0.0,
-        ).to(tl.float32)  # (MAX_K,)
-
-        t_h = ki_range  # halo positions [0, k-2]
-        t_h_mask = t_h < (k - 1)
-        ki_2d = t_h[:, None] - t_prime_h[None, :]  # (MAX_K, MAX_K)
-        valid_2d = (
-            t_h_mask[:, None] & t_prime_h_mask[None, :] & (ki_2d >= 0) & (ki_2d < k)
-        )
-        w_2d = tl.load(W_ptr + ch * k + ki_2d, mask=valid_2d, other=0.0)
-        dh_accs = tl.sum(d_out_h[None, :] * w_2d, axis=1)  # (MAX_K,)
-        tl.store(
-            dHALO_ptr + b * stride_hb + t_h * stride_ht + ch * stride_hd,
-            dh_accs,
-            mask=t_h_mask,
-        )
-
-    dw_accs = tl.zeros((MAX_K,), dtype=tl.float32)
-    for t_base in range(0, T, BLOCK_T):
-        t = t_base + tl.arange(0, BLOCK_T)
-        t_mask = t < T
+        # dW: dOUT[t] is the ki=k-1 row already in L1 from the dX load above.
         d_out = tl.load(
             dOUT_ptr + b * stride_b + t * stride_t + ch * stride_d,
             mask=t_mask,
@@ -174,6 +150,31 @@ def _causal_dwconv_bwd_kernel(
             ).to(tl.float32)
 
         dw_accs = dw_accs + tl.sum(d_out[None, :] * x_vals, axis=1)
+
+    # dHALO[t_h] = sum_{t'=0}^{t_h} d_out[t'] * w[t_h - t']
+    # Only the first k-1 output positions feed into halo grads.
+    if USE_HALO:
+        t_prime_h = ki_range  # shape (MAX_K,), mask to [0, k-2]
+        t_prime_h_mask = t_prime_h < tl.minimum(k - 1, T)
+        d_out_h = tl.load(
+            dOUT_ptr + b * stride_b + t_prime_h * stride_t + ch * stride_d,
+            mask=t_prime_h_mask,
+            other=0.0,
+        ).to(tl.float32)  # (MAX_K,)
+
+        t_h = ki_range  # halo positions [0, k-2]
+        t_h_mask = t_h < (k - 1)
+        ki_2d = t_h[:, None] - t_prime_h[None, :]  # (MAX_K, MAX_K)
+        valid_2d = (
+            t_h_mask[:, None] & t_prime_h_mask[None, :] & (ki_2d >= 0) & (ki_2d < k)
+        )
+        w_2d = tl.load(W_ptr + ch * k + ki_2d, mask=valid_2d, other=0.0)
+        dh_accs = tl.sum(d_out_h[None, :] * w_2d, axis=1)  # (MAX_K,)
+        tl.store(
+            dHALO_ptr + b * stride_hb + t_h * stride_ht + ch * stride_hd,
+            dh_accs,
+            mask=t_h_mask,
+        )
 
     tl.atomic_add(dW_ptr + ch * k + ki_range, dw_accs, mask=ki_range < k)
 

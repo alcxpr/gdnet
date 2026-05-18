@@ -204,11 +204,12 @@ def gate_w2_bwd(
     BLOCK_D: int,
 ) -> tuple[torch.Tensor, ...]:
     n_rows, d = g_pre.shape
+    dtype = g_pre.dtype
     block_d, num_warps = _bwd_elem_tile(d)
     d_g_pre = torch.empty(n_rows, d, dtype=torch.float32, device=g_pre.device)  # type: ignore
-    d_conv = torch.empty(n_rows, d, dtype=torch.float32, device=g_pre.device)  # type: ignore
-    d_side = torch.empty(n_rows, d, dtype=torch.float32, device=g_pre.device)  # type: ignore
-    d_R = torch.empty(n_rows, d, dtype=torch.float32, device=g_pre.device)  # type: ignore
+    d_conv = torch.empty(n_rows, d, dtype=dtype, device=g_pre.device)  # type: ignore
+    d_side = torch.empty(n_rows, d, dtype=dtype, device=g_pre.device)  # type: ignore
+    d_R = torch.empty(n_rows, d, dtype=dtype, device=g_pre.device)  # type: ignore
     _gate_bwd_elem_kernel[(n_rows,)](
         d_fwd_f,
         d_side_f,
@@ -225,11 +226,14 @@ def gate_w2_bwd(
         BLOCK_D=block_d,
         num_warps=num_warps,  # type: ignore
     )
-    H_NORM = H.float() * RSTD[:, None] * W_norm.float()
-    dW2 = torch.mm(d_g_pre.t(), H_NORM)  # type: ignore
+    # Cast d_g_pre once to bf16 for both mm calls; avoids the larger fp32 intermediates
+    # that .float() would create on W2/H/W_norm (all already bf16 from the forward).
+    d_g_pre_b16 = d_g_pre.to(dtype)
+    H_NORM = H * RSTD[:, None].to(dtype) * W_norm
+    dW2 = torch.mm(d_g_pre_b16.t(), H_NORM)  # type: ignore
     db2 = d_g_pre.sum(0)
-    d_h_norm = torch.mm(d_g_pre, W2.float())  # type: ignore
-    dW_norm = (d_h_norm * H.float() * RSTD[:, None]).sum(0)
+    d_h_norm = torch.mm(d_g_pre_b16, W2)  # type: ignore
+    dW_norm = (d_h_norm * H * RSTD[:, None].to(dtype)).sum(0)
     return d_h_norm, d_conv, d_side, d_R, dW2, db2, dW_norm
 
 

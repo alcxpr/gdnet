@@ -122,7 +122,6 @@ def run(
     if main_proc:
         OUT_DIR.mkdir(exist_ok=True)
 
-    # --- torch.profiler ---
     if main_proc:
         print("\n[1/3] torch.profiler ...", flush=True)
 
@@ -151,7 +150,6 @@ def run(
         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=25))
         print(f"\nChrome trace -> {OUT_DIR / 'trace.json'}")
 
-    # --- cProfile ---
     if main_proc:
         print("\n[2/3] cProfile ...", flush=True)
 
@@ -171,7 +169,6 @@ def run(
         (OUT_DIR / "cprofile.txt").write_text(txt)
         print(f"cProfile -> {OUT_DIR / 'cprofile.txt'}")
 
-    # --- Bytecode ---
     if main_proc:
         print("\n[3/3] Bytecode (key forward methods) ...", flush=True)
         buf = io.StringIO()

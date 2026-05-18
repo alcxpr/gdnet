@@ -58,8 +58,8 @@ class GatedCausalDepthwiseConvFunction(torch.autograd.Function):
         BLOCK_D = ctx.BLOCK_D
         n_rows, d = conv_flat.shape
 
-        d_fwd_f = d_fwd_out.contiguous().view(n_rows, d).to(torch.float32)  # type: ignore
-        d_side_f = d_side_out.contiguous().view(n_rows, d).to(torch.float32)  # type: ignore
+        d_fwd_f = d_fwd_out.contiguous().view(n_rows, d)  # type: ignore
+        d_side_f = d_side_out.contiguous().view(n_rows, d)  # type: ignore
 
         d_h_norm, d_conv, d_side, d_R, dW2, db2, dW_norm = gate_w2_bwd(
             d_fwd_f,
