@@ -22,12 +22,24 @@ def autocast(precision: Precision = "fp32"):
 
 
 def convert_to_fp8(model: torch.nn.Module) -> torch.nn.Module:
-    """Convert all nn.Linear layers in model to torchao Float8Linear in-place.
+    """Convert eligible nn.Linear layers to torchao Float8Linear in-place.
+
+    Skips spectral-normalized linears (weight_orig in _parameters) because SN
+    replaces weight with a plain tensor computed via hook, which Float8Linear
+    cannot accept. Also skips layers whose dimensions aren't divisible by 16,
+    which is an fp8 alignment requirement.
 
     Call once after model construction and before DDP/compile wrapping.
     Requires an fp8-capable GPU (sm_89+, e.g. H100/Ada).
     """
     from torchao.float8 import convert_to_float8_training  # type: ignore
 
-    convert_to_float8_training(model)
+    def _filter(mod: torch.nn.Module, fqn: str) -> bool:
+        if "weight_orig" in mod._parameters:
+            return False
+        if mod.in_features % 16 != 0 or mod.out_features % 16 != 0:
+            return False
+        return True
+
+    convert_to_float8_training(model, module_filter_fn=_filter)
     return model
