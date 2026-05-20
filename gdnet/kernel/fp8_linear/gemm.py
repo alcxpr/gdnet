@@ -29,10 +29,14 @@ class _Fp8GemmSM90:
         self,
         tile_shape_mn: tuple[int, int] = (128, 128),
         cluster_shape_mn: tuple[int, int] = (1, 1),
+        swizzle_size: int = 1,
+        raster_along_m: bool = True,
     ):
         self.acc_dtype = cutlass.Float32
         self.c_dtype = cutlass.BFloat16
         self.cluster_shape_mn = cluster_shape_mn
+        self.swizzle_size = swizzle_size
+        self.raster_along_m = raster_along_m
         self.tile_shape_mnk = (*tile_shape_mn, 1)
         self.atom_layout_mnk = (
             (2, 1, 1) if tile_shape_mn[0] > 64 and tile_shape_mn[1] > 128 else (1, 1, 1)
@@ -170,6 +174,8 @@ class _Fp8GemmSM90:
             self.tile_shape_mnk,
             self.cluster_shape_mn,
             max_active_clusters,
+            self.swizzle_size,
+            self.raster_along_m,
         )
 
         @cute.struct
@@ -669,7 +675,14 @@ class _Fp8GemmSM90:
         )
 
     @staticmethod
-    def _compute_grid(d, tile_shape_mnk, cluster_shape_mn, max_active_clusters):
+    def _compute_grid(
+        d,
+        tile_shape_mnk,
+        cluster_shape_mn,
+        max_active_clusters,
+        swizzle_size,
+        raster_along_m,
+    ):
         c_shape = cute.slice_(tile_shape_mnk, (None, None, 0))  # type: ignore
         gd = cute.zipped_divide(d, tiler=c_shape)
         num_ctas_mn = gd[(0, (None, None))].shape  # type: ignore
@@ -678,8 +691,8 @@ class _Fp8GemmSM90:
         tile_sched_params = utils.PersistentTileSchedulerParams(
             num_ctas_mnl,
             cluster_shape_mnl,
-            1,
-            True,
+            swizzle_size,
+            raster_along_m,
         )
         grid = utils.StaticPersistentTileScheduler.get_grid_shape(
             tile_sched_params, max_active_clusters
@@ -688,6 +701,13 @@ class _Fp8GemmSM90:
 
 
 def _pick_tile(M: int, N: int) -> tuple[int, int]:
+    ratio = M / N
+    if ratio >= 4:
+        # tall-skinny: smaller N tile keeps CTA count high along N
+        if N % 128 == 0 and M % 128 == 0:
+            return (128, 128)
+        if N % 64 == 0 and M % 128 == 0:
+            return (128, 64)
     if N % 256 == 0 and M % 128 == 0:
         return (128, 256)
     if N % 128 == 0 and M % 128 == 0:
@@ -695,6 +715,15 @@ def _pick_tile(M: int, N: int) -> tuple[int, int]:
     if N % 64 == 0 and M % 64 == 0:
         return (64, 64)
     return (128, 128)
+
+
+def _pick_swizzle(M: int, N: int) -> tuple[int, bool]:
+    ratio = M / N
+    if ratio >= 4:
+        return 4, False  # tall-skinny: N-major raster + swizzle for L2 reuse
+    if ratio <= 0.25:
+        return 4, True  # wide: M-major raster + swizzle
+    return 1, True  # square-ish: default
 
 
 def fp8_gemm(
@@ -727,12 +756,17 @@ def fp8_gemm(
     scale_b_cute = _to_cute(scale_b, cutlass.Float32)
 
     tile_mn = _pick_tile(M, N)
-    key = (M, N, K, tile_mn)
+    swizzle_size, raster_along_m = _pick_swizzle(M, N)
+    key = (M, N, K, tile_mn, swizzle_size, raster_along_m)
     if key not in _kernel_cache:
         hw = cutlass.utils.HardwareInfo()
         max_clusters = hw.get_max_active_clusters(1)
         stream = cuda.CUstream(torch.cuda.current_stream(a.device).cuda_stream)
-        gemm_obj = _Fp8GemmSM90(tile_shape_mn=tile_mn)
+        gemm_obj = _Fp8GemmSM90(
+            tile_shape_mn=tile_mn,
+            swizzle_size=swizzle_size,
+            raster_along_m=raster_along_m,
+        )
         _kernel_cache[key] = (
             cute.compile(
                 gemm_obj,

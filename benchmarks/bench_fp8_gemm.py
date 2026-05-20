@@ -12,7 +12,7 @@ from gdnet.kernel.fp8_linear import fp8_gemm, quantize_fp8
 
 FP8_MAX = 448.0
 
-CONFIGS = [
+CONFIGS_SYNTHETIC = [
     (4096, 4096, 4096),
     (4096, 16384, 4096),
     (16384, 4096, 4096),
@@ -20,6 +20,20 @@ CONFIGS = [
     (4096, 4096, 8192),
     (8192, 32768, 8192),
 ]
+
+# d=2048, token_budget=32768 (B*T is always 32768)
+# fwd W1/W2: (32768, 2048, 2048); fwd W1 gated: (32768, 2048, 4096)
+# wgrad W1/W2: (2048, 2048, 32768); wgrad W1 gated: (2048, 4096, 32768)
+# dgrad W1/W2: (32768, 2048, 2048); dgrad W1 gated: (32768, 4096, 2048)
+CONFIGS_TRAINING = [
+    (32768, 2048, 2048),
+    (32768, 2048, 4096),
+    (32768, 4096, 2048),
+    (2048, 2048, 32768),
+    (2048, 4096, 32768),
+]
+
+CONFIGS = CONFIGS_TRAINING
 
 H100_FP8_PEAK_TFLOPS = 1979.0
 
