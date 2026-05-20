@@ -7,20 +7,16 @@ Setup:
   - Each training sample is (pos, transition_type) -> (next_pos)
   - z_t = embed(pos), z_t1 = embed(next_pos).detach()
 
-We train two TransitionOperators variants side-by-side:
-  - MSE: original objective (F.mse_loss)
-  - CTR: contrastive + load-balance (InfoNCE + entropy penalty)
-
-After training we measure:
-  1. Loss curves
-  2. Routing specialization: for each transition type, which operator wins most?
-     Ideal: each transition type -> a distinct dominant operator
-  3. Routing entropy per transition type (lower = more specialized)
-  4. Balance: fraction of samples routed to each operator
+Four variants:
+  MSE        original MSE objective
+  CTR        contrastive + load-balance, router sees z_t only
+  CTR-WEAK   CTR with balance_coef=0.001 (weaker balancing)
+  CTR-DELTA  CTR with router seeing z_t1 - z_t (oracle ceiling: router has transition signal)
 
 Run:
   uv run python experiments/grid/train.py
-  uv run python experiments/grid/train.py --no-plot   (for headless)
+  uv run python experiments/grid/train.py --steps 5000 --n-ops 4
+  uv run python experiments/grid/train.py --no-plot
 """
 
 import argparse
@@ -49,10 +45,18 @@ def _pos(row: int, col: int) -> int:
 
 
 TRANSITIONS = {
-    "up":    [(_pos(r, c), _pos((r - 1) % GRID, c)) for r in range(GRID) for c in range(GRID)],
-    "down":  [(_pos(r, c), _pos((r + 1) % GRID, c)) for r in range(GRID) for c in range(GRID)],
-    "left":  [(_pos(r, c), _pos(r, (c - 1) % GRID)) for r in range(GRID) for c in range(GRID)],
-    "right": [(_pos(r, c), _pos(r, (c + 1) % GRID)) for r in range(GRID) for c in range(GRID)],
+    "up": [
+        (_pos(r, c), _pos((r - 1) % GRID, c)) for r in range(GRID) for c in range(GRID)
+    ],
+    "down": [
+        (_pos(r, c), _pos((r + 1) % GRID, c)) for r in range(GRID) for c in range(GRID)
+    ],
+    "left": [
+        (_pos(r, c), _pos(r, (c - 1) % GRID)) for r in range(GRID) for c in range(GRID)
+    ],
+    "right": [
+        (_pos(r, c), _pos(r, (c + 1) % GRID)) for r in range(GRID) for c in range(GRID)
+    ],
 }
 TRANS_NAMES = list(TRANSITIONS.keys())
 N_TRANS = len(TRANS_NAMES)
@@ -62,55 +66,70 @@ for tid, name in enumerate(TRANS_NAMES):
     for src, dst in TRANSITIONS[name]:
         ALL_PAIRS.append((src, dst, tid))
 
-ALL_PAIRS_T = torch.tensor(ALL_PAIRS, dtype=torch.long)
+ALL_PAIRS_T = torch.tensor(ALL_PAIRS, dtype=torch.long)  # type: ignore
 
 
 class MSEOps(nn.Module):
     def __init__(self, d: int, n_ops: int):
         super().__init__()
         self.W = nn.Parameter(
-            torch.stack([torch.eye(d) + torch.randn(d, d) * 0.01 for _ in range(n_ops)])
+            torch.stack([torch.eye(d) + torch.randn(d, d) * 0.01 for _ in range(n_ops)])  # type: ignore
         )
         self.router = nn.Linear(d, n_ops, bias=False)
-        self.log_tau = nn.Parameter(torch.tensor(0.0))
+        self.log_tau = nn.Parameter(torch.tensor(0.0))  # type: ignore
         self.n_ops = n_ops
 
     def loss(self, z_t: torch.Tensor, z_t1: torch.Tensor) -> torch.Tensor:
         tau = self.log_tau.exp().clamp(min=0.1)
         w = F.softmax(self.router(z_t) / tau, dim=-1)
-        preds = torch.einsum("oij,bj->boi", self.W, z_t)
+        preds = torch.einsum("oij,bj->boi", self.W, z_t)  # type: ignore
         z_pred = (w.unsqueeze(-1) * preds).sum(dim=1)
         return F.mse_loss(z_pred, z_t1)
 
     @torch.no_grad()
-    def routing_weights(self, z_t: torch.Tensor) -> torch.Tensor:
+    def routing_weights(
+        self, z_t: torch.Tensor, z_t1: torch.Tensor | None = None
+    ) -> torch.Tensor:
         tau = self.log_tau.exp().clamp(min=0.1)
         return F.softmax(self.router(z_t) / tau, dim=-1)
 
 
 class CTROps(nn.Module):
-    def __init__(self, d: int, n_ops: int, balance_coef: float = BALANCE_COEF):
+    def __init__(
+        self,
+        d: int,
+        n_ops: int,
+        balance_coef: float = BALANCE_COEF,
+        use_delta: bool = False,
+    ):
         super().__init__()
         self.W = nn.Parameter(
-            torch.stack([torch.eye(d) + torch.randn(d, d) * 0.01 for _ in range(n_ops)])
+            torch.stack([torch.eye(d) + torch.randn(d, d) * 0.01 for _ in range(n_ops)])  # type: ignore
         )
-        self.router = nn.Linear(d, n_ops, bias=False)
-        self.log_tau = nn.Parameter(torch.tensor(0.0))
-        self.log_temp = nn.Parameter(torch.tensor(-2.66))
+        router_in = d * 2 if use_delta else d
+        self.router = nn.Linear(router_in, n_ops, bias=False)
+        self.log_tau = nn.Parameter(torch.tensor(0.0))  # type: ignore
+        self.log_temp = nn.Parameter(torch.tensor(-2.66))  # type: ignore
         self.n_ops = n_ops
         self.balance_coef = balance_coef
+        self.use_delta = use_delta
+
+    def _route(self, z_t: torch.Tensor, z_t1: torch.Tensor | None) -> torch.Tensor:
+        tau = self.log_tau.exp().clamp(min=0.1)
+        if self.use_delta and z_t1 is not None:
+            inp = torch.cat([z_t, z_t1 - z_t], dim=-1)  # type: ignore
+        else:
+            inp = z_t
+        return F.softmax(self.router(inp) / tau, dim=-1)
 
     def loss(self, z_t: torch.Tensor, z_t1: torch.Tensor) -> torch.Tensor:
-        tau = self.log_tau.exp().clamp(min=0.1)
-        w = F.softmax(self.router(z_t) / tau, dim=-1)
-        preds = torch.einsum("oij,bj->boi", self.W, z_t)
+        w = self._route(z_t, z_t1)
+        preds = torch.einsum("oij,bj->boi", self.W, z_t)  # type: ignore
         z_pred = (w.unsqueeze(-1) * preds).sum(dim=1)
 
         temp = self.log_temp.exp().clamp(min=0.01)
-        z_pred_n = F.normalize(z_pred, dim=-1)
-        z_t1_n = F.normalize(z_t1, dim=-1)
-        logits = z_pred_n @ z_t1_n.t() / temp
-        labels = torch.arange(z_t.shape[0], device=z_t.device)
+        logits = F.normalize(z_pred, dim=-1) @ F.normalize(z_t1, dim=-1).t() / temp
+        labels = torch.arange(z_t.shape[0], device=z_t.device)  # type: ignore
         recon = F.cross_entropy(logits, labels)
 
         mean_w = w.mean(dim=0)
@@ -118,26 +137,29 @@ class CTROps(nn.Module):
         return recon + self.balance_coef * balance
 
     @torch.no_grad()
-    def routing_weights(self, z_t: torch.Tensor) -> torch.Tensor:
-        tau = self.log_tau.exp().clamp(min=0.1)
-        return F.softmax(self.router(z_t) / tau, dim=-1)
+    def routing_weights(
+        self, z_t: torch.Tensor, z_t1: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self._route(z_t, z_t1)
 
 
 @dataclass
 class RunResult:
     name: str
     losses: list[float] = field(default_factory=list)
-    routing_matrix: torch.Tensor = field(default_factory=lambda: torch.zeros(1))
-    balance: torch.Tensor = field(default_factory=lambda: torch.zeros(1))
+    routing_matrix: torch.Tensor = field(default_factory=lambda: torch.zeros(1))  # type: ignore
+    balance: torch.Tensor = field(default_factory=lambda: torch.zeros(1))  # type: ignore
 
 
 def sample_batch(batch_size: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    idx = torch.randint(len(ALL_PAIRS_T), (batch_size,))
+    idx = torch.randint(len(ALL_PAIRS_T), (batch_size,))  # type: ignore
     rows = ALL_PAIRS_T[idx]
     return rows[:, 0], rows[:, 1], rows[:, 2]
 
 
-def train(model: nn.Module, embed: nn.Embedding, steps: int, batch: int, lr: float, name: str) -> RunResult:
+def train(
+    model: nn.Module, embed: nn.Embedding, steps: int, batch: int, lr: float, name: str
+) -> RunResult:
     result = RunResult(name=name)
     opt = torch.optim.Adam(list(model.parameters()) + list(embed.parameters()), lr=lr)
 
@@ -148,7 +170,7 @@ def train(model: nn.Module, embed: nn.Embedding, steps: int, batch: int, lr: flo
         z_t = embed(src_ids)
         z_t1 = embed(dst_ids).detach()
 
-        loss = model.loss(z_t, z_t1)
+        loss = model.loss(z_t, z_t1)  # type: ignore
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -160,18 +182,22 @@ def train(model: nn.Module, embed: nn.Embedding, steps: int, batch: int, lr: flo
 
 
 @torch.no_grad()
-def eval_routing(model: nn.Module, embed: nn.Embedding) -> tuple[torch.Tensor, torch.Tensor]:
-    routing = torch.zeros(N_TRANS, model.n_ops)
-    for tid, name in enumerate(TRANS_NAMES):
-        pairs = TRANSITIONS[name]
-        src_ids = torch.tensor([p for p, _ in pairs], device=DEVICE)
+def eval_routing(
+    model: nn.Module, embed: nn.Embedding
+) -> tuple[torch.Tensor, torch.Tensor]:
+    routing = torch.zeros(N_TRANS, model.n_ops)  # type: ignore
+    for tid, tname in enumerate(TRANS_NAMES):
+        pairs = TRANSITIONS[tname]
+        src_ids = torch.tensor([p for p, _ in pairs], device=DEVICE)  # type: ignore
+        dst_ids = torch.tensor([q for _, q in pairs], device=DEVICE)  # type: ignore
         z_t = embed(src_ids)
-        w = model.routing_weights(z_t).cpu()
+        z_t1 = embed(dst_ids)
+        w = model.routing_weights(z_t, z_t1).cpu()  # type: ignore
         routing[tid] = w.mean(dim=0)
 
-    all_src = torch.arange(N_POS, device=DEVICE)
+    all_src = torch.arange(N_POS, device=DEVICE)  # type: ignore
     z_all = embed(all_src)
-    balance = model.routing_weights(z_all).cpu().mean(dim=0)
+    balance = model.routing_weights(z_all).cpu().mean(dim=0)  # type: ignore
     return routing, balance
 
 
@@ -186,28 +212,31 @@ def print_results(result: RunResult) -> None:
     late = sum(losses[-window:]) / window
     print(f"  loss  early={early:.4f}  late={late:.4f}")
 
-    print(f"\n  routing matrix (transition x operator), mean weight:")
-    print(f"  {'':8s}", end="")
+    print("\n  routing matrix (transition x operator), mean weight:")
+    print(f"  {'':12s}", end="")
     for o in range(result.routing_matrix.shape[1]):
         print(f"  op{o}", end="")
     print()
-    for tid, name in enumerate(TRANS_NAMES):
+    for tid, tname in enumerate(TRANS_NAMES):
         row = result.routing_matrix[tid]
         dominant = row.argmax().item()
-        print(f"  {name:8s}", end="")
+        print(f"  {tname:12s}", end="")
         for o in range(len(row)):
             marker = "*" if o == dominant else " "
             print(f" {row[o].item():.2f}{marker}", end="")
-        w = row
-        ent = -(w * w.clamp(min=1e-9).log()).sum().item()
+        ent = -(row * row.clamp(min=1e-9).log()).sum().item()
         print(f"  entropy={ent:.3f}")
 
     dominant_ops = result.routing_matrix.argmax(dim=1).tolist()
     n_unique = len(set(dominant_ops))
-    print(f"\n  dominant ops: {[TRANS_NAMES[i]+'->'+'op'+str(dominant_ops[i]) for i in range(N_TRANS)]}")
-    print(f"  unique dominant ops: {n_unique}/{N_TRANS}  ({'specialized' if n_unique == N_TRANS else 'collapsed'})")
+    print(
+        f"\n  dominant ops: {[TRANS_NAMES[i] + '->op' + str(dominant_ops[i]) for i in range(N_TRANS)]}"
+    )
+    print(
+        f"  unique dominant ops: {n_unique}/{N_TRANS}  ({'specialized' if n_unique == N_TRANS else 'collapsed'})"
+    )
 
-    print(f"\n  operator load balance (fraction of all positions):")
+    print("\n  operator load balance:")
     for o, frac in enumerate(result.balance.tolist()):
         bar = "#" * int(frac * 40)
         print(f"  op{o}  {frac:.3f}  {bar}")
@@ -220,26 +249,40 @@ def plot_results(results: list[RunResult]) -> None:
         print("matplotlib not available, skipping plots")
         return
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    n = len(results)
+    fig, axes = plt.subplots(
+        2, max(2, math.ceil(n / 2) + 1), figsize=(5 * (max(2, math.ceil(n / 2) + 1)), 8)
+    )
+    axes = axes.flatten()
 
-    ax = axes[0]
     window = 50
+    ax = axes[0]
     for r in results:
-        smoothed = [sum(r.losses[max(0, i - window):i + 1]) / min(i + 1, window) for i in range(len(r.losses))]
+        smoothed = [
+            sum(r.losses[max(0, i - window) : i + 1]) / min(i + 1, window)
+            for i in range(len(r.losses))
+        ]
         ax.plot(smoothed, label=r.name)
     ax.set_title("Loss (smoothed)")
     ax.set_xlabel("step")
     ax.legend()
 
-    for ax, r in zip(axes[1:], results):
+    for i, r in enumerate(results):
+        ax = axes[i + 1]
         mat = r.routing_matrix.numpy()
         im = ax.imshow(mat, aspect="auto", vmin=0, vmax=mat.max())
-        ax.set_title(f"{r.name}: routing matrix")
+        ax.set_title(f"{r.name}")
         ax.set_yticks(range(N_TRANS))
         ax.set_yticklabels(TRANS_NAMES)
         ax.set_xlabel("operator")
         plt.colorbar(im, ax=ax)
 
+    for ax in axes[len(results) + 1 :]:
+        ax.set_visible(False)
+
+    plt.suptitle(
+        "Routing matrix: rows=transition type, cols=operator, brighter=higher weight"
+    )
     plt.tight_layout()
     out = "experiments/grid/results.png"
     plt.savefig(out, dpi=120)
@@ -257,28 +300,53 @@ def main() -> None:
 
     torch.manual_seed(SEED)
 
-    embed_mse = nn.Embedding(N_POS, args.d).to(DEVICE)
-    embed_ctr = nn.Embedding(N_POS, args.d).to(DEVICE)
-    nn.init.normal_(embed_mse.weight, std=0.1)
-    embed_ctr.weight.data.copy_(embed_mse.weight.data)
+    embed_ref = nn.Embedding(N_POS, args.d).to(DEVICE)
+    nn.init.normal_(embed_ref.weight, std=0.1)
 
-    mse_ops = MSEOps(args.d, args.n_ops).to(DEVICE)
-    ctr_ops = CTROps(args.d, args.n_ops).to(DEVICE)
+    def fresh_embed() -> nn.Embedding:
+        e = nn.Embedding(N_POS, args.d).to(DEVICE)
+        e.weight.data.copy_(embed_ref.weight.data)
+        return e
 
-    print(f"Training on {DEVICE}, d={args.d}, n_ops={args.n_ops}, steps={args.steps}, batch={args.batch}")
+    variants: list[tuple[nn.Module, nn.Embedding, str]] = [
+        (MSEOps(args.d, args.n_ops).to(DEVICE), fresh_embed(), "MSE"),
+        (
+            CTROps(args.d, args.n_ops, balance_coef=BALANCE_COEF).to(DEVICE),
+            fresh_embed(),
+            "CTR",
+        ),
+        (
+            CTROps(args.d, args.n_ops, balance_coef=0.001).to(DEVICE),
+            fresh_embed(),
+            "CTR-WEAK",
+        ),
+        (
+            CTROps(args.d, args.n_ops, balance_coef=BALANCE_COEF, use_delta=True).to(
+                DEVICE
+            ),
+            fresh_embed(),
+            "CTR-DELTA",
+        ),
+    ]
+
+    print(
+        f"Training on {DEVICE}, d={args.d}, n_ops={args.n_ops}, steps={args.steps}, batch={args.batch}"
+    )
     print(f"Grid: {GRID}x{GRID}, {N_TRANS} transition types, {N_POS} positions")
+    print(
+        f"Variants: MSE / CTR (bal={BALANCE_COEF}) / CTR-WEAK (bal=0.001) / CTR-DELTA (router sees z_t1-z_t)"
+    )
 
-    print("\n[1/2] MSE objective...")
-    r_mse = train(mse_ops, embed_mse, args.steps, args.batch, LR, "MSE")
+    results = []
+    for model, embed, name in variants:
+        print(f"\n[{name}]...")
+        results.append(train(model, embed, args.steps, args.batch, LR, name))
 
-    print("[2/2] Contrastive + balance objective...")
-    r_ctr = train(ctr_ops, embed_ctr, args.steps, args.batch, LR, "CTR")
-
-    print_results(r_mse)
-    print_results(r_ctr)
+    for r in results:
+        print_results(r)
 
     if not args.no_plot:
-        plot_results([r_mse, r_ctr])
+        plot_results(results)
 
 
 if __name__ == "__main__":
