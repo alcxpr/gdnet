@@ -169,7 +169,7 @@ class GDLayer(nn.Module):
     ) -> tuple[torch.Tensor, ...]:
         B, T, d = fwd.shape
         conv_3d, conv_flat = self._conv_flat(fwd, self.conv_fwd)
-        R = self._recovery("rf", side, conv_3d.to(fwd.dtype))
+        R = self._recovery("rf", side, conv_3d)
         fwd_out, side_out = gated_output(
             conv_flat,
             side,
@@ -182,11 +182,11 @@ class GDLayer(nn.Module):
         )
         if return_gate:
             return (
-                fwd_out.view(B, T, d).to(fwd.dtype),
-                side_out.view(B, T, d).to(fwd.dtype),
+                fwd_out.view(B, T, d),
+                side_out.view(B, T, d),
                 self._gate("gf", conv_3d),
             )
-        return fwd_out.view(B, T, d).to(fwd.dtype), side_out.view(B, T, d).to(fwd.dtype)
+        return fwd_out.view(B, T, d), side_out.view(B, T, d)
 
     def fwd_step_sp(
         self,
@@ -208,7 +208,7 @@ class GDLayer(nn.Module):
         """
         B, T, d = fwd.shape
         conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_fwd, sp_group)
-        R = self._recovery("rf", side, conv_3d.to(fwd.dtype))
+        R = self._recovery("rf", side, conv_3d)
         fwd_out, side_out = gated_output(
             conv_flat,
             side,
@@ -221,11 +221,11 @@ class GDLayer(nn.Module):
         )
         if return_gate:
             return (
-                fwd_out.view(B, T, d).to(fwd.dtype),
-                side_out.view(B, T, d).to(fwd.dtype),
+                fwd_out.view(B, T, d),
+                side_out.view(B, T, d),
                 self._gate("gf", conv_3d),
             )
-        return fwd_out.view(B, T, d).to(fwd.dtype), side_out.view(B, T, d).to(fwd.dtype)
+        return fwd_out.view(B, T, d), side_out.view(B, T, d)
 
     def bwd_step(
         self,
@@ -234,7 +234,7 @@ class GDLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         B, T, d = fwd.shape
         conv_3d, conv_flat = self._conv_flat(fwd, self.conv_bwd)
-        R = self._recovery("rb", side, conv_3d.to(fwd.dtype))
+        R = self._recovery("rb", side, conv_3d)
         fwd_out, side_out = gated_output(
             conv_flat,
             side,
@@ -245,7 +245,7 @@ class GDLayer(nn.Module):
             self.gb_W2.weight,  # type: ignore
             self.gb_W2.bias,  # type: ignore
         )
-        return fwd_out.view(B, T, d).to(fwd.dtype), side_out.view(B, T, d).to(fwd.dtype)
+        return fwd_out.view(B, T, d), side_out.view(B, T, d)
 
     def bwd_step_sp(
         self,
@@ -265,7 +265,7 @@ class GDLayer(nn.Module):
         """
         B, T, d = fwd.shape
         conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_bwd, sp_group)
-        R = self._recovery("rb", side, conv_3d.to(fwd.dtype))
+        R = self._recovery("rb", side, conv_3d)
         fwd_out, side_out = gated_output(
             conv_flat,
             side,
@@ -276,4 +276,4 @@ class GDLayer(nn.Module):
             self.gb_W2.weight,  # type: ignore
             self.gb_W2.bias,  # type: ignore
         )
-        return fwd_out.view(B, T, d).to(fwd.dtype), side_out.view(B, T, d).to(fwd.dtype)
+        return fwd_out.view(B, T, d), side_out.view(B, T, d)

@@ -58,8 +58,8 @@ class GatedCausalDepthwiseConvFunction(torch.autograd.Function):
         BLOCK_D = ctx.BLOCK_D
         n_rows, d = conv_flat.shape
 
-        d_fwd_f = d_fwd_out.contiguous().view(n_rows, d)  # type: ignore
-        d_side_f = d_side_out.contiguous().view(n_rows, d)  # type: ignore
+        d_fwd_f = d_fwd_out.reshape(n_rows, d)  # type: ignore
+        d_side_f = d_side_out.reshape(n_rows, d)  # type: ignore
 
         d_h_norm, d_conv, d_side, d_R, dW2, db2, dW_norm = gate_w2_bwd(
             d_fwd_f,
@@ -117,8 +117,8 @@ def gated_output(
     """
     n_rows, d = conv_flat.shape
     dtype = conv_flat.dtype
-    side_flat = side.to(dtype).contiguous().view(n_rows, d)
-    R_flat = R.to(dtype).contiguous().view(n_rows, d)
+    side_flat = side.to(dtype).reshape(n_rows, d)
+    R_flat = R.to(dtype).reshape(n_rows, d)
     return GatedCausalDepthwiseConvFunction.apply(  # type: ignore
         conv_flat,
         side_flat,
@@ -167,7 +167,7 @@ def gated_causal_depthwise_conv(
     assert d == triton.next_power_of_2(d), f"d={d} must be a power of 2"
 
     BLOCK_T = min(triton.next_power_of_2(T), 64)
-    x_dt = x.contiguous().permute(0, 2, 1).contiguous()
+    x_dt = x.permute(0, 2, 1).contiguous()
     conv_out_dt = CausalDWConvFunction.apply(x_dt, W_conv, T, k, BLOCK_T)
     conv_flat = conv_out_dt.permute(0, 2, 1).contiguous().view(B * T, d)  # type: ignore
 

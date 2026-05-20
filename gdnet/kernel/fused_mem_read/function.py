@@ -17,18 +17,9 @@ class FusedMemReadFunction(torch.autograd.Function):
         alpha: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         alpha_f = float(alpha.item())
-
-        q_c = q.contiguous()
-        gamma_c = gamma.contiguous()
-        e_c = e.contiguous()
-        btags_c = buffer_tags.contiguous()
-        bvals_c = buffer_vals.contiguous()
-
-        retrieved_c, w = fused_mem_read_fwd(
-            q_c, gamma_c, e_c, btags_c, bvals_c, alpha_f
-        )
-
-        ctx.save_for_backward(q_c, gamma_c, e_c, btags_c, bvals_c, w, alpha)
+        tensors = [t.contiguous() for t in (q, gamma, e, buffer_tags, buffer_vals)]
+        retrieved_c, w = fused_mem_read_fwd(*tensors, alpha_f)
+        ctx.save_for_backward(*tensors, w, alpha)
         ctx.dtype = q.dtype
         return retrieved_c, w
 
@@ -52,8 +43,7 @@ class FusedMemReadFunction(torch.autograd.Function):
             alpha_f,
         )
 
-        # d_e needs a reduction over B; one matmul, no atomics
-        d_e = alpha_f * (d_sim.t() @ gamma_f.float())
+        d_e = alpha_f * (d_sim.t() @ gamma_f.to(d_sim.dtype))
         d_alpha = d_alpha_per_b.sum().reshape_as(alpha)
 
         dtype = ctx.dtype
