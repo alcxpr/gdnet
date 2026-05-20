@@ -169,10 +169,8 @@ def projected_step(
     if base_model.trans_enabled and tokens.shape[1] >= 2:
         with make_autocast(precision):  # type: ignore
             mid = tokens.shape[1] // 2
-            _, side1, _, _, _, _, _ = model(tokens[:, :mid], sp_group=sp_group)
-            _, side2, _, _, _, _, _ = model(tokens[:, mid:], sp_group=sp_group)
-            z_t = side1[0].mean(dim=1)
-            z_t1 = side2[0].mean(dim=1).detach()
+            z_t = side[0][:, :mid].mean(dim=1)
+            z_t1 = side[0][:, mid:].mean(dim=1).detach()
             loss_trans = 0.1 * base_model.trans_ops.loss(z_t, z_t1)  # type: ignore
         with no_sync():
             if scaler:

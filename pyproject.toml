@@ -13,6 +13,7 @@ dependencies = [
     "watchfiles>=1.0",
     "torch==2.11.0",
     "torchao==0.17.0",
+    "nvidia-cutlass-dsl>=4.5.1",
 ]
 
 [tool.uv.sources]
