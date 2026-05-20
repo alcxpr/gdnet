@@ -709,6 +709,16 @@ class _Fp8GemmSM90:
         return tile_sched_params, grid
 
 
+def _pick_tile(M: int, N: int) -> tuple[int, int]:
+    if N % 256 == 0 and M % 128 == 0:
+        return (128, 256)
+    if N % 128 == 0 and M % 128 == 0:
+        return (128, 128)
+    if N % 64 == 0 and M % 64 == 0:
+        return (64, 64)
+    return (128, 128)
+
+
 def fp8_gemm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -738,12 +748,13 @@ def fp8_gemm(
     scale_a_cute = _to_cute(scale_a, cutlass.Float32)
     scale_b_cute = _to_cute(scale_b, cutlass.Float32)
 
-    key = (M, N, K)
+    tile_mn = _pick_tile(M, N)
+    key = (M, N, K, tile_mn)
     if key not in _kernel_cache:
         hw = cutlass.utils.HardwareInfo()
         max_clusters = hw.get_max_active_clusters(1)
         stream = cuda.CUstream(torch.cuda.current_stream(a.device).cuda_stream)
-        gemm_obj = _Fp8GemmSM90()
+        gemm_obj = _Fp8GemmSM90(tile_shape_mn=tile_mn)
         _kernel_cache[key] = (
             cute.compile(
                 gemm_obj,
