@@ -116,8 +116,9 @@ class CTROps(nn.Module):
 
     def _route(self, z_t: torch.Tensor, z_t1: torch.Tensor | None) -> torch.Tensor:
         tau = self.log_tau.exp().clamp(min=0.1)
-        if self.use_delta and z_t1 is not None:
-            inp = torch.cat([z_t, z_t1 - z_t], dim=-1)  # type: ignore
+        if self.use_delta:
+            delta = (z_t1 - z_t) if z_t1 is not None else torch.zeros_like(z_t)  # type: ignore
+            inp = torch.cat([z_t, delta], dim=-1)  # type: ignore
         else:
             inp = z_t
         return F.softmax(self.router(inp) / tau, dim=-1)
