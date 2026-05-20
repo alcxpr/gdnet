@@ -29,11 +29,9 @@ class _Fp8GemmSM90:
         self,
         tile_shape_mn: tuple[int, int] = (128, 128),
         cluster_shape_mn: tuple[int, int] = (1, 1),
-        mma_promotion_interval: int = 4,
     ):
         self.acc_dtype = cutlass.Float32
         self.c_dtype = cutlass.BFloat16
-        self.mma_promotion_interval = mma_promotion_interval
         self.cluster_shape_mn = cluster_shape_mn
         self.tile_shape_mnk = (*tile_shape_mn, 1)
         self.atom_layout_mnk = (
@@ -51,7 +49,11 @@ class _Fp8GemmSM90:
             self.num_dma_warp_groups * self.num_warps_per_warp_group
         )
         self.load_register_requirement = 40
-        self.mma_register_requirement = 232
+        wgmma_m = 64
+        accum_regs_per_thread = (
+            wgmma_m * tile_shape_mn[1] // self.num_threads_per_warp_group
+        )
+        self.mma_register_requirement = accum_regs_per_thread + 48
         self.smem_capacity = utils.get_smem_capacity_in_bytes("sm_90")
         self.occupancy = 1
         self.num_mma_threads = (
@@ -96,12 +98,7 @@ class _Fp8GemmSM90:
             self.tile_shape_mnk[1],
             mma_inst_shape_k * mma_inst_tile_k,
         )
-        num_k_blocks = mma_inst_tile_k
-        if self.mma_promotion_interval % num_k_blocks != 0:
-            raise ValueError(
-                f"mma_promotion_interval ({self.mma_promotion_interval}) must be "
-                f"a multiple of {num_k_blocks}"
-            )
+
         self.cta_layout_mnk = cute.make_layout((*self.cluster_shape_mn, 1))
         is_cooperative = self.atom_layout_mnk == (2, 1, 1)
         self.epi_tile = self._compute_epi_tile(
@@ -359,7 +356,6 @@ class _Fp8GemmSM90:
         tCgD = thr_mma.partition_C(gD_mn)
         acc_shape = tCgD.shape[:3]
         accumulators = cute.make_rmem_tensor(acc_shape, self.acc_dtype)
-        accum_temp = cute.make_rmem_tensor(acc_shape, self.acc_dtype)
 
         k_tile_cnt = cute.size(gA_mk, mode=[2])  # type: ignore
         pipeline_init_wait(cluster_shape_mn=self.cluster_shape_mn)
@@ -469,7 +465,6 @@ class _Fp8GemmSM90:
                 mainloop_consumer_release_state.reset_count()
                 accumulators.fill(0.0)
                 tiled_mma.set(cute.nvgpu.warpgroup.Field.ACCUMULATE, False)
-                mma_count = 0
                 cute.nvgpu.warpgroup.fence()
 
                 for k_tile in range(prologue_mma_cnt):
@@ -483,20 +478,13 @@ class _Fp8GemmSM90:
                         )
                         cute.gemm(
                             tiled_mma,
-                            accum_temp,
+                            accumulators,
                             tCrA[k_block_coord],
                             tCrB[k_block_coord],
-                            accum_temp,
+                            accumulators,
                         )
                         tiled_mma.set(cute.nvgpu.warpgroup.Field.ACCUMULATE, True)
                     cute.nvgpu.warpgroup.commit_group()
-                    mma_count += num_k_blocks
-                    if mma_count == self.mma_promotion_interval:
-                        cute.nvgpu.warpgroup.wait_group(0)
-                        for i in range(cute.size(accumulators)):  # type: ignore
-                            accumulators[i] = accumulators[i] + accum_temp[i]
-                        mma_count = 0
-                        tiled_mma.set(cute.nvgpu.warpgroup.Field.ACCUMULATE, False)
                     mainloop_consumer_read_state.advance()
 
                 for k_tile in range(prologue_mma_cnt, k_tile_cnt):
@@ -510,29 +498,19 @@ class _Fp8GemmSM90:
                         )
                         cute.gemm(
                             tiled_mma,
-                            accum_temp,
+                            accumulators,
                             tCrA[k_block_coord],
                             tCrB[k_block_coord],
-                            accum_temp,
+                            accumulators,
                         )
                         tiled_mma.set(cute.nvgpu.warpgroup.Field.ACCUMULATE, True)
                     cute.nvgpu.warpgroup.commit_group()
                     cute.nvgpu.warpgroup.wait_group(k_pipe_mmas)
-                    mma_count += num_k_blocks
-                    if mma_count == self.mma_promotion_interval:
-                        cute.nvgpu.warpgroup.wait_group(0)
-                        for i in range(cute.size(accumulators)):  # type: ignore
-                            accumulators[i] = accumulators[i] + accum_temp[i]
-                        mma_count = 0
-                        tiled_mma.set(cute.nvgpu.warpgroup.Field.ACCUMULATE, False)
                     mainloop_pipeline.consumer_release(mainloop_consumer_release_state)
                     mainloop_consumer_release_state.advance()
                     mainloop_consumer_read_state.advance()
 
                 cute.nvgpu.warpgroup.wait_group(0)
-                if mma_count > 0:
-                    for i in range(cute.size(accumulators)):  # type: ignore
-                        accumulators[i] = accumulators[i] + accum_temp[i]
 
                 for k_tile in range(prologue_mma_cnt):
                     mainloop_pipeline.consumer_release(mainloop_consumer_release_state)
