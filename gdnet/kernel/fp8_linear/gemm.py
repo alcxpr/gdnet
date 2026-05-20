@@ -462,7 +462,7 @@ class _Fp8GemmSM90:
 
             while work_tile.is_valid_tile:
                 tile_coord_mn = work_tile.tile_idx
-                gD_mn_slice = gD_mn[(None, None, *tile_coord_mn)]
+                gD_mn_slice = gD_mn[(None, None, tile_coord_mn[0], tile_coord_mn[1])]
 
                 mainloop_consumer_read_state.reset_count()
                 mainloop_consumer_release_state.reset_count()
