@@ -38,7 +38,7 @@ def _quantize_fp8_kernel(
 
     tl.atomic_max(amax_ptr, tl.max(tl.abs(x)))
 
-    x_fp8 = tl.clamp(x * scale, -FP8_MAX, FP8_MAX).to(tl.float8e4nv)
+    x_fp8 = tl.clamp(x * scale, -448.0, 448.0).to(tl.float8e4nv)
 
     tl.store(
         xr_ptr + offs_m[:, None] * stride_xrm + offs_k[None, :],
