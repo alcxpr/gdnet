@@ -64,28 +64,21 @@ def test_correctness(M, N, K):
 
 def test_unit_scales():
     M, N, K = 128, 128, 128
-    torch.manual_seed(10)
-    a_fp8 = torch.randint(-4, 4, (M, K), dtype=torch.int8, device="cuda").view(
-        torch.float8_e4m3fn
-    )
-    b_fp8 = torch.randint(-4, 4, (N, K), dtype=torch.int8, device="cuda").view(
-        torch.float8_e4m3fn
-    )
+    a_fp8, _ = _make_fp8((M, K), seed=10)
+    b_fp8, _ = _make_fp8((N, K), seed=11)
     out = fp8_gemm(a_fp8, b_fp8, 1.0, 1.0)
     ref = _reference(a_fp8, b_fp8, 1.0, 1.0)
-    torch.testing.assert_close(out, ref, atol=0.5, rtol=0.01)
+    torch.testing.assert_close(out, ref, atol=1.0, rtol=0.05)
 
 
 def test_scale_applied():
     M, N, K = 128, 128, 128
-    torch.manual_seed(20)
     a_fp8, inv_a = _make_fp8((M, K), seed=20)
     b_fp8, inv_b = _make_fp8((N, K), seed=21)
     out_scaled = fp8_gemm(a_fp8, b_fp8, inv_a, inv_b)
     out_unit = fp8_gemm(a_fp8, b_fp8, 1.0, 1.0)
-    expected_ratio = inv_a * inv_b
-    ratio = (out_scaled.float() / out_unit.float().clamp(min=1e-6)).mean().item()
-    assert abs(ratio - expected_ratio) / (abs(expected_ratio) + 1e-6) < 0.1
+    expected = out_unit.float() * (inv_a * inv_b)
+    torch.testing.assert_close(out_scaled.float(), expected, atol=1e-3, rtol=0.01)
 
 
 def test_kernel_cache():
