@@ -201,6 +201,7 @@ class _Fp8GemmSM90:
 
         self.shared_storage = SharedStorage
 
+        self.kernel.set_name_prefix("fp8_gemm_sm90")
         self.kernel(
             tma_atom_a,
             tma_tensor_a,
@@ -632,12 +633,8 @@ class _Fp8GemmSM90:
         epi_stage,
     ):
         a_smem_shape = cute.slice_(tile_shape_mnk, (None, 0, None))  # type: ignore
-        a_is_k_major = (
-            a_layout.sm90_mma_major_mode() == cute.nvgpu.warpgroup.OperandMajorMode.K
-        )
-        b_is_k_major = (
-            b_layout.sm90_mma_major_mode() == cute.nvgpu.warpgroup.OperandMajorMode.K
-        )
+        a_is_k_major = a_layout.sm90_mma_major_mode() == cute.nvgpu.OperandMajorMode.K  # type: ignore
+        b_is_k_major = b_layout.sm90_mma_major_mode() == cute.nvgpu.OperandMajorMode.K  # type: ignore
         a_major_mode_size = tile_shape_mnk[2 if a_is_k_major else 0]
         a_smem_layout_atom = cute.nvgpu.warpgroup.make_smem_layout_atom(
             sm90_utils.get_smem_layout_atom(a_layout, a_dtype, a_major_mode_size),
