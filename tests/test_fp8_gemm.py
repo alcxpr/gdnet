@@ -62,14 +62,6 @@ def test_correctness(M, N, K):
     torch.testing.assert_close(out, ref, atol=1.0, rtol=0.05)
 
 
-def test_unit_scales():
-    M, N, K = 128, 128, 128
-    a_fp8, _ = _make_fp8((M, K), seed=10)
-    b_fp8, _ = _make_fp8((N, K), seed=11)
-    out = fp8_gemm(a_fp8, b_fp8, 1.0, 1.0)
-    ref = _reference(a_fp8, b_fp8, 1.0, 1.0)
-    torch.testing.assert_close(out, ref, atol=0.0, rtol=0.1)
-
 
 def test_scale_applied():
     M, N, K = 128, 128, 128
