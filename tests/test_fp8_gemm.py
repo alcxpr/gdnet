@@ -16,7 +16,7 @@ FP8_MAX = 448.0
 
 def _make_fp8(shape: tuple[int, ...], seed: int = 0) -> tuple[torch.Tensor, float]:
     torch.manual_seed(seed)
-    x = torch.randn(*shape, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(*shape, dtype=torch.bfloat16, device="cuda")  # type: ignore
     scale = FP8_MAX / x.float().abs().max().item()
     x_fp8, _, _ = quantize_fp8(x, scale=scale)
     x_fp8 = x_fp8.contiguous()
@@ -30,9 +30,9 @@ def _reference(
     inv_scale_a: float,
     inv_scale_b: float,
 ) -> torch.Tensor:
-    return (
-        (a_fp8.float() @ b_fp8.float().T) * inv_scale_a * inv_scale_b
-    ).to(torch.bfloat16)
+    return ((a_fp8.float() @ b_fp8.float().T) * inv_scale_a * inv_scale_b).to(
+        torch.bfloat16  # type: ignore
+    )
 
 
 @pytest.mark.parametrize(
@@ -50,7 +50,7 @@ def test_shapes(M, N, K):
     b_fp8, inv_b = _make_fp8((N, K), seed=1)
     out = fp8_gemm(a_fp8, b_fp8, inv_a, inv_b)
     assert out.shape == (M, N)
-    assert out.dtype == torch.bfloat16
+    assert out.dtype == torch.bfloat16  # type: ignore
 
 
 @pytest.mark.parametrize("M,N,K", [(128, 128, 128), (256, 128, 256), (128, 256, 128)])
@@ -68,7 +68,7 @@ def test_unit_scales():
     b_fp8, _ = _make_fp8((N, K), seed=11)
     out = fp8_gemm(a_fp8, b_fp8, 1.0, 1.0)
     ref = _reference(a_fp8, b_fp8, 1.0, 1.0)
-    torch.testing.assert_close(out, ref, atol=1.0, rtol=0.05)
+    torch.testing.assert_close(out, ref, atol=0.0, rtol=0.1)
 
 
 def test_scale_applied():
@@ -94,7 +94,7 @@ def test_kernel_cache():
 
 
 @pytest.mark.parametrize("M,N,K", [(128, 128, 128), (256, 256, 256)])
-def test_forward_dgrad_wgrad_interface(M, N, K):
+def test_forward_wgrad_interface(M, N, K):
     x_fp8, inv_x = _make_fp8((M, K), seed=40)
     w_fp8, inv_w = _make_fp8((N, K), seed=41)
     x_col_fp8 = x_fp8.T.contiguous()
@@ -103,9 +103,5 @@ def test_forward_dgrad_wgrad_interface(M, N, K):
     fwd = fp8_gemm(x_fp8, w_fp8, inv_x, inv_w)
     assert fwd.shape == (M, N)
 
-    if K == N:
-        dgrad_a = x_col_fp8
-        dgrad_b = w_fp8
-        if dgrad_a.shape[0] % 64 == 0 and dgrad_b.shape[0] % 64 == 0:
-            dgrad = fp8_gemm(dgrad_a, dgrad_b, inv_x, inv_w)
-            assert dgrad.shape == (K, N)
+    wgrad = fp8_gemm(w_col_fp8, x_col_fp8, inv_w, inv_x)
+    assert wgrad.shape == (K, K)
