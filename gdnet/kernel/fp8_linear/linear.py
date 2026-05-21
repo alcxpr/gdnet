@@ -60,7 +60,7 @@ class FP8Linear(nn.Module):
         self.weight = nn.Parameter(linear.weight.data.bfloat16())
         self.register_parameter(
             "bias",
-            nn.Parameter(linear.bias.data) if linear.bias is not None else None,
+            nn.Parameter(linear.bias.data.bfloat16()) if linear.bias is not None else None,
         )
         self.scale_update_freq = scale_update_freq
         dev = linear.weight.device
@@ -68,6 +68,7 @@ class FP8Linear(nn.Module):
         self.register_buffer("scale_w", torch.ones(1, device=dev))  # type: ignore
         self._step: int = 0
 
+    @torch.compiler.disable
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shape = x.shape
         x_flat = x.reshape(-1, shape[-1]).bfloat16()
