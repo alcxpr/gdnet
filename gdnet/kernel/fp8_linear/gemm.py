@@ -495,7 +495,10 @@ class _Fp8GemmSM90:
                 tiled_mma.set(cute.nvgpu.warpgroup.Field.ACCUMULATE, False)
                 cute.nvgpu.warpgroup.fence()
 
-                self.mma_barriers[consumer_wg_idx].arrive_and_wait()
+                if consumer_wg_idx == 0:
+                    self.mma_barriers[0].arrive_and_wait()
+                else:
+                    self.mma_barriers[1].arrive_and_wait()
 
                 for k_tile in range(prologue_mma_cnt):
                     mainloop_pipeline.consumer_wait(mainloop_consumer_read_state)
@@ -546,7 +549,10 @@ class _Fp8GemmSM90:
                     mainloop_pipeline.consumer_release(mainloop_consumer_release_state)
                     mainloop_consumer_release_state.advance()
 
-                self.mma_barriers[1 - consumer_wg_idx].arrive()
+                if consumer_wg_idx == 0:
+                    self.mma_barriers[1].arrive()
+                else:
+                    self.mma_barriers[0].arrive()
 
                 for i in range(cute.size(accumulators)):  # type: ignore
                     accumulators[i] = accumulators[i] * scale_val
@@ -581,7 +587,10 @@ class _Fp8GemmSM90:
                         tRS_sD[(None, None, None, epi_buffer)],
                     )
                     cute.arch.fence_proxy("async.shared", space="cta")
-                    self.epi_barriers[consumer_wg_idx].arrive_and_wait()
+                    if consumer_wg_idx == 0:
+                        self.epi_barriers[0].arrive_and_wait()
+                    else:
+                        self.epi_barriers[1].arrive_and_wait()
                     gmem_coord = epi_tile_layout.get_hier_coord(epi_idx)
                     epi_store_warp = (
                         self.epi_store_warp_id
@@ -595,9 +604,15 @@ class _Fp8GemmSM90:
                         )
                         tma_store_pipeline.producer_commit()
                         tma_store_pipeline.producer_acquire()
-                    self.epi_barriers[consumer_wg_idx].arrive_and_wait()
+                    if consumer_wg_idx == 0:
+                        self.epi_barriers[0].arrive_and_wait()
+                    else:
+                        self.epi_barriers[1].arrive_and_wait()
 
-                self.epi_barriers[1 - consumer_wg_idx].arrive()
+                if consumer_wg_idx == 0:
+                    self.epi_barriers[1].arrive()
+                else:
+                    self.epi_barriers[0].arrive()
 
                 tile_sched.advance_to_next_work()
                 if work_tile.is_valid_tile:
