@@ -80,6 +80,9 @@ class Config:
     decay_start: int = 80_000
     phases: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     n_write: int = 4
+    # logging
+    project: str = ""
+    run: str = ""
     # precision / compile
     precision: str = "bf16"
     compile: bool = False
@@ -434,6 +437,16 @@ def main() -> None:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         monitor = TrainingMonitor(handles, cfg.total_steps)
 
+        if cfg.project:
+            import wandb
+
+            wandb.init(
+                project=cfg.project,
+                name=cfg.run or None,
+                config=dataclasses.asdict(cfg),
+                resume="allow",
+            )
+
     try:
         with (
             Live(console=console, refresh_per_second=4) if main_proc else nullcontext()  # type: ignore
@@ -516,14 +529,26 @@ def main() -> None:
 
                     if main_proc and step % cfg.log_every == 0:
                         dt = (time.perf_counter() - t0) / cfg.log_every
+                        lr_now = scheduler.get_last_lr()[0]  # type: ignore
+                        tps = B * T / dt
                         monitor.log(  # type: ignore
                             step,
                             loss,
-                            scheduler.get_last_lr()[0],  # type: ignore
-                            B * T / dt,
+                            lr_now,
+                            tps,
                             dt * 1000,
                             B * T,
                         )
+                        if cfg.project:
+                            wandb.log(  # type: ignore
+                                {
+                                    "loss": loss,
+                                    "lr": lr_now,
+                                    "tok_per_sec": tps,
+                                    "ms_per_step": dt * 1000,
+                                },
+                                step=step,
+                            )
                         t0 = time.perf_counter()
 
                     if main_proc and step % cfg.ckpt_every == 0:
@@ -541,6 +566,8 @@ def main() -> None:
             path = ckpt_dir / f"step_{step:07d}_final.pt"
             save_ckpt(path, step, model, optimizer, scheduler)  # type: ignore
             console.log(f"final checkpoint: {path}")  # type: ignore
+            if cfg.project:
+                wandb.finish()  # type: ignore
             pynvml.nvmlShutdown()
         destroy()
 

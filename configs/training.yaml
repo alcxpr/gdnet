@@ -51,9 +51,11 @@ phases:
       min_chars: 0
       steps: 400000
 
-cam_start: 10000
-trans_start: 20000
 n_write: 4
+accum_steps: 1
+
+project: ""
+run: ""
 
 precision: fp8
 compile: true
