@@ -738,7 +738,7 @@ def fp8_gemm(
     assert K % 16 == 0, "K must be a multiple of 16 for FP8 TMA alignment"
     assert M % 64 == 0 and N % 64 == 0, "M and N must be multiples of 64"
 
-    d = torch.empty(M, N, dtype=torch.bfloat16, device=a.device)  # type: ignore
+    d = torch.zeros(M, N, dtype=torch.bfloat16, device=a.device)  # type: ignore
 
     scale_a = torch.tensor([inv_scale_a], dtype=torch.float32, device=a.device)  # type: ignore
     scale_b = torch.tensor([inv_scale_b], dtype=torch.float32, device=b.device)  # type: ignore
