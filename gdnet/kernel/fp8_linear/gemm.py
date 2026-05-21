@@ -373,12 +373,11 @@ class _Fp8GemmSM90:
                 tile_coord_mn = work_tile.tile_idx
                 tAgA_mk = tAgA[(None, tile_coord_mn[0], None)]
                 tBgB_nk = tBgB[(None, tile_coord_mn[1], None)]
-                mainloop_producer_state.reset_count()
                 for k_tile in range(k_tile_cnt):
                     mainloop_pipeline.producer_acquire(mainloop_producer_state)
-                    tAgA_k = tAgA_mk[(None, mainloop_producer_state.count)]
+                    tAgA_k = tAgA_mk[(None, k_tile)]
                     tAsA_pipe = tAsA[(None, mainloop_producer_state.index)]
-                    tBgB_k = tBgB_nk[(None, mainloop_producer_state.count)]
+                    tBgB_k = tBgB_nk[(None, k_tile)]
                     tBsB_pipe = tBsB[(None, mainloop_producer_state.index)]
                     cute.copy(
                         tma_atom_a,
@@ -483,8 +482,6 @@ class _Fp8GemmSM90:
                 tile_coord_mn = work_tile.tile_idx
                 gD_mn_slice = gD_mn[(None, None, tile_coord_mn[0], tile_coord_mn[1])]
 
-                mainloop_consumer_read_state.reset_count()
-                mainloop_consumer_release_state.reset_count()
                 accumulators.fill(0.0)
                 tiled_mma.set(cute.nvgpu.warpgroup.Field.ACCUMULATE, False)
                 cute.nvgpu.warpgroup.fence()
