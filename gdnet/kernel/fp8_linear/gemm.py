@@ -353,21 +353,6 @@ class _Fp8GemmSM90:
         warp_group_idx = cute.arch.make_warp_uniform(
             tidx // self.num_threads_per_warp_group
         )
-        mma_warp_group_thread_layout = cute.make_layout(
-            self.num_mma_warp_groups, stride=self.num_threads_per_warp_group
-        )
-        thr_mma = tiled_mma.get_slice(
-            mma_warp_group_thread_layout(warp_group_idx - self.num_dma_warp_groups)
-        )
-
-        tCsA = thr_mma.partition_A(sA)
-        tCsB = thr_mma.partition_B(sB)
-        tCrA = tiled_mma.make_fragment_A(tCsA)
-        tCrB = tiled_mma.make_fragment_B(tCsB)
-
-        tCgD = thr_mma.partition_C(gD_mn)
-        acc_shape = tCgD.shape[:3]
-        accumulators = cute.make_rmem_tensor(acc_shape, self.acc_dtype)
 
         k_tile_cnt = cute.size(gA_mk, mode=[2])  # type: ignore
         pipeline_init_wait(cluster_shape_mn=self.cluster_shape_mn)
