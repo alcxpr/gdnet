@@ -225,6 +225,8 @@ def run_config(
     model = make_model(T_local)
     total_params, non_embed_params = param_counts(model)
 
+    if precision in ("bf16", "fp8"):
+        model.to(torch.bfloat16)  # type: ignore
     if precision == "fp8":
         convert_to_fp8(model)
 

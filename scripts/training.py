@@ -383,9 +383,7 @@ def main() -> None:
     ).cuda()
 
     if precision in ("bf16", "fp8"):
-        for mod in model.modules():
-            if isinstance(mod, torch.nn.RMSNorm):
-                mod.weight.data = mod.weight.data.to(torch.bfloat16)  # type: ignore
+        model.to(torch.bfloat16)  # type: ignore
 
     if precision == "fp8":
         convert_to_fp8(model)
