@@ -33,7 +33,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 torch.set_float32_matmul_precision("high")
 
-from gdnet.layer import freeze_sn_iteration
 from gdnet.loss import projected_step
 from gdnet.model import GDNet
 from gdnet.utils.distributed import (
@@ -256,35 +255,31 @@ def run_config(
     torch.cuda.reset_peak_memory_stats(device)
 
     for i in range(n_warmup):
-        ctx = freeze_sn_iteration(model) if i % 50 != 0 else nullcontext()  # type: ignore
-        with ctx:
-            projected_step(
-                model,  # type: ignore
-                params,
-                optimizer,
-                tokens,
-                targets,
-                precision=precision,
-                write_chunks=write_chunks,
-                sp_group=sp_group,
-            )
+        projected_step(
+            model,  # type: ignore
+            params,
+            optimizer,
+            tokens,
+            targets,
+            precision=precision,
+            write_chunks=write_chunks,
+            sp_group=sp_group,
+        )
     torch.cuda.synchronize(device)
 
     torch.cuda.reset_peak_memory_stats(device)
     t0 = time.perf_counter()
     for i in range(n_steps):
-        ctx = freeze_sn_iteration(model) if (i + n_warmup) % 50 != 0 else nullcontext()  # type: ignore
-        with ctx:
-            projected_step(
-                model,  # type: ignore
-                params,
-                optimizer,
-                tokens,
-                targets,
-                precision=precision,
-                write_chunks=write_chunks,
-                sp_group=sp_group,
-            )
+        projected_step(
+            model,  # type: ignore
+            params,
+            optimizer,
+            tokens,
+            targets,
+            precision=precision,
+            write_chunks=write_chunks,
+            sp_group=sp_group,
+        )
     torch.cuda.synchronize(device)
 
     ms_per_step = (time.perf_counter() - t0) / n_steps * 1000

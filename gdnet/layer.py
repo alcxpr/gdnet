@@ -1,6 +1,3 @@
-from contextlib import contextmanager
-from typing import Generator
-
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -13,38 +10,6 @@ from .kernel.gated_causal_depthwise_conv import (
     gated_output,
 )
 from .utils.sp import SPHaloExchange
-
-
-@contextmanager
-def freeze_sn_iteration(module: nn.Module) -> Generator[None, None, None]:
-    """Skip spectral norm power iteration for one forward pass.
-
-    Sigma is recomputed from the cached u/v vectors (no GEMV), and
-    weight = weight_orig / sigma is still applied. Use every K steps to
-    amortize the GEMV cost without sacrificing stability.
-
-    K=50 is a good default - sigma drift is negligible and it recovers most of
-    the GEMV overhead. Lower K is safer early in training if you're unsure.
-
-    Usage::
-        for step, batch in enumerate(loader):
-            ctx = freeze_sn_iteration(model) if step % 50 != 0 else nullcontext()
-            with ctx:
-                loss = train_step(model, batch)
-    """
-    hooks = [
-        hook
-        for m in module.modules()
-        for hook in m._forward_pre_hooks.values()
-        if hasattr(hook, "n_power_iterations")
-    ]
-    for h in hooks:
-        h.n_power_iterations = 0  # type: ignore
-    try:
-        yield
-    finally:
-        for h in hooks:
-            h.n_power_iterations = 1  # type: ignore
 
 
 class CausalDepthWiseConv1d(nn.Module):

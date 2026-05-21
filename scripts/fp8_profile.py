@@ -22,7 +22,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import torch
 import torch.profiler
 
-from gdnet.layer import freeze_sn_iteration
 from gdnet.loss import projected_step
 from gdnet.model import GDNet
 from gdnet.utils.fp8 import Precision, convert_to_fp8
@@ -60,17 +59,15 @@ def step(
     precision: Precision,
     i: int,
 ):
-    ctx = freeze_sn_iteration(model) if i % 50 != 0 else nullcontext()
-    with ctx:
-        projected_step(
-            model,
-            params,
-            optimizer,
-            tokens,
-            targets,
-            precision=precision,
-            write_chunks=write_chunks if model.cam_enabled else None,
-        )
+    projected_step(
+        model,
+        params,
+        optimizer,
+        tokens,
+        targets,
+        precision=precision,
+        write_chunks=write_chunks if model.cam_enabled else None,
+    )
 
 
 def bench(

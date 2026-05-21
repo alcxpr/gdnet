@@ -17,7 +17,6 @@ import sys
 import threading
 import time
 from collections import deque
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -28,15 +27,10 @@ import torch
 import torch._functorch.config
 import watchfiles
 import yaml
-from rich.columns import Columns
-from rich.console import Console
-from rich.live import Live
-from rich.table import Table
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
 from gdnet.data import FineWebEduDataset, NemotronDataset, PackedTokenDataset
-from gdnet.layer import freeze_sn_iteration
 from gdnet.loss import projected_step
 from gdnet.model import GDNet
 from gdnet.utils.distributed import (
@@ -108,121 +102,115 @@ class Config:
         return cls(**{k: v for k, v in d.items() if v is not None})
 
 
-def _gpu_table(handles: list) -> Table:
-    t = Table(title="GPU", expand=True)
-    t.add_column("GPU", no_wrap=True)
-    t.add_column("Util", justify="right")
-    t.add_column("VRAM Used", justify="right")
-    t.add_column("VRAM Total", justify="right")
-    t.add_column("VRAM %", justify="right")
-    total_util, total_used, total_vram = 0.0, 0.0, 0.0
-    for i, handle in enumerate(handles):
-        name = pynvml.nvmlDeviceGetName(handle)
-        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        used_gb = mem.used / 1024**3  # type: ignore
-        tot_gb = mem.total / 1024**3  # type: ignore
-        pct = used_gb / tot_gb * 100
-        uc = "green" if util.gpu < 50 else "yellow" if util.gpu < 85 else "red"  # type: ignore
-        mc = "green" if pct < 50 else "yellow" if pct < 85 else "red"
-        t.add_row(
-            f"[{i}] {name}",
-            f"[{uc}]{util.gpu}%[/]",  # type: ignore
-            f"[{mc}]{used_gb:.2f} GB[/]",
-            f"{tot_gb:.2f} GB",
-            f"[{mc}]{pct:.1f}%[/]",
-        )
-        total_util += util.gpu  # type: ignore
-        total_used += used_gb
-        total_vram += tot_gb
-    n = len(handles)
-    avg_pct = total_used / total_vram * 100
-    au = "green" if total_util / n < 50 else "yellow" if total_util / n < 85 else "red"
-    am = "green" if avg_pct < 50 else "yellow" if avg_pct < 85 else "red"
-    t.add_section()
-    t.add_row(
-        f"[bold]avg ({n})[/bold]",
-        f"[{au}]{total_util / n:.1f}%[/]",
-        f"[{am}]{total_used / n:.2f} GB[/]",
-        f"{total_vram / n:.2f} GB",
-        f"[{am}]{avg_pct:.1f}%[/]",
-    )
-    return t
+@dataclasses.dataclass
+class State:
+    step: int = 0
+    total_steps: int = 0
+    loss: float = float("nan")
+    lr: float = 0.0
+    tok_per_sec: float = 0.0
+    ms_per_step: float = 0.0
+    phase: str = ""
 
 
-class TrainingMonitor:
-    _MAX_ROWS = 15
-
-    def __init__(self, handles: list, total_steps: int) -> None:
-        self._handles = handles
-        self._total_steps = total_steps
-        self._step = 0
-        self._phase = ""
-        self._rows: list[tuple] = []
-        self._stop = threading.Event()
-        self._live: Live | None = None
-
-    def start(self, live: Live) -> None:
-        self._live = live
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        self._thread.join()
-
-    def set_phase(self, label: str) -> None:
-        self._phase = label
-        self._rows.clear()
-
-    def tick(self, step: int) -> None:
-        self._step = step
-
-    def log(
+class Shell:
+    def __init__(
         self,
-        step: int,
-        loss: float,
-        lr: float,
-        tps: float,
-        ms: float,
-        tok_per_step: int,
+        state: State,
+        optimizer: torch.optim.Optimizer,
+        handles: list,
+        stop_event: threading.Event,
+        save_event: threading.Event,
     ) -> None:
-        self._step = step
-        self._rows.append((step, loss, lr, tps, ms, tok_per_step))
-        if len(self._rows) > self._MAX_ROWS:
-            self._rows.pop(0)
+        self._state = state
+        self._optimizer = optimizer
+        self._handles = handles
+        self._stop = stop_event
+        self._save = save_event
 
-    def _metrics_table(self) -> Table:
-        pct = self._step / max(self._total_steps, 1) * 100
-        t = Table(
-            title=f"{self._phase}  step={self._step}/{self._total_steps}  ({pct:.1f}%)",
-            expand=True,
-        )
-        t.add_column("step", justify="right")
-        t.add_column("loss", justify="right")
-        t.add_column("lr", justify="right")
-        t.add_column("tok/s", justify="right")
-        t.add_column("tok/step", justify="right")
-        t.add_column("ms/step", justify="right")
-        for step, loss, lr, tps, ms, tpst in self._rows:
-            t.add_row(
-                str(step),
-                f"{loss:.4f}",
-                f"{lr:.2e}",
-                f"{tps:,.0f}",
-                f"{tpst:,}",
-                f"{ms:.1f}",
-            )
-        return t
+    def start(self) -> None:
+        t = threading.Thread(target=self._loop, daemon=True)
+        t.start()
 
-    def _render(self) -> Columns:
-        return Columns([self._metrics_table(), _gpu_table(self._handles)])
+    def _write(self, s: str) -> None:
+        sys.stdout.write(s)
+        sys.stdout.flush()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            if self._live is not None:
-                self._live.update(self._render())
-            self._stop.wait(0.5)
+            try:
+                sys.stdout.write(">> ")
+                sys.stdout.flush()
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                self._handle(line.strip())
+            except (EOFError, OSError):
+                break
+
+    def _handle(self, line: str) -> None:
+        parts = line.split()
+        if not parts:
+            return
+        cmd, *args = parts
+        s = self._state
+
+        if cmd == "status":
+            pct = s.step / max(s.total_steps, 1) * 100
+            self._write(
+                f"phase      : {s.phase}\n"
+                f"step       : {s.step}/{s.total_steps}  ({pct:.1f}%)\n"
+                f"loss       : {s.loss:.4f}\n"
+                f"lr         : {s.lr:.2e}\n"
+                f"throughput : {s.tok_per_sec:,.0f} tok/s\n"
+                f"ms/step    : {s.ms_per_step:.1f}\n"
+            )
+
+        elif cmd == "eta":
+            remaining = s.total_steps - s.step
+            if s.ms_per_step > 0 and remaining > 0:
+                secs = int(remaining * s.ms_per_step / 1000)
+                h, r = divmod(secs, 3600)
+                m, sc = divmod(r, 60)
+                self._write(f"eta: {h}h {m}m {sc}s  ({remaining} steps)\n")
+            else:
+                self._write("eta: unknown\n")
+
+        elif cmd == "gpu":
+            for i, h in enumerate(self._handles):
+                util = pynvml.nvmlDeviceGetUtilizationRates(h)
+                mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+                used = mem.used / 1024**3
+                total = mem.total / 1024**3
+                self._write(
+                    f"gpu[{i}]  util={util.gpu}%  mem={used:.1f}/{total:.1f} GB  ({used/total*100:.1f}%)\n"
+                )
+
+        elif cmd == "save":
+            self._save.set()
+            self._write("checkpoint queued\n")
+
+        elif cmd == "stop":
+            self._stop.set()
+            self._write("stopping after current step...\n")
+
+        elif cmd == "lr":
+            if not args:
+                self._write(f"lr = {self._optimizer.param_groups[0]['lr']:.2e}\n")
+            else:
+                try:
+                    val = float(args[0])
+                    for pg in self._optimizer.param_groups:
+                        pg["lr"] = val
+                    self._write(f"lr -> {val:.2e}\n")
+                except ValueError:
+                    self._write(f"bad value: {args[0]}\n")
+
+        elif cmd == "help":
+            self._write("status  eta  gpu  save  stop  lr [val]  help\n")
+
+        else:
+            self._write(f"unknown: {cmd}\n")
 
 
 class CudaPrefetcher:
@@ -427,15 +415,13 @@ def main() -> None:
             pynvml.nvmlDeviceGetHandleByIndex(i)
             for i in range(pynvml.nvmlDeviceGetCount())
         ]
-        console = Console()
-        n_params = sum(p.numel() for p in base_model.parameters())
-        console.print(
-            f"params={n_params / 1e6:.1f}M  precision={precision}  world={world_size}  total_steps={cfg.total_steps}"
-        )
-        if cfg.resume:
-            console.print(f"resumed from {cfg.resume} at step {step}")
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        monitor = TrainingMonitor(handles, cfg.total_steps)
+
+        state = State(total_steps=cfg.total_steps, step=step)
+        stop_event = threading.Event()
+        save_event = threading.Event()
+        shell = Shell(state, optimizer, handles, stop_event, save_event)
+        shell.start()
 
         if cfg.project:
             import wandb
@@ -448,124 +434,113 @@ def main() -> None:
             )
 
     try:
-        with (
-            Live(console=console, refresh_per_second=4) if main_proc else nullcontext()  # type: ignore
-        ) as live:
+        phase_start = 0
+        for phase in cfg.phases:
+            phase_end = phase_start + phase["steps"]
+
+            if step >= phase_end:
+                phase_start = phase_end
+                continue
+
+            source = phase.get("dataset", "fineweb-edu")
+            T = phase["seq_len"]
+            if T % world_size != 0:
+                raise ValueError(
+                    f"phase seq_len {T} must be divisible by world_size {world_size}"
+                )
+            T_local = T // world_size
+            B = max(1, cfg.token_budget // T)
+
             if main_proc:
-                monitor.start(live)  # type: ignore
+                state.phase = f"{source}  seq_len={T}  B={B}  steps {phase_start}-{phase_end}"  # type: ignore
 
-            phase_start = 0
-            for phase in cfg.phases:
-                phase_end = phase_start + phase["steps"]
+            if phase.get("path"):
+                _wait_for_file(phase["path"], rank)
+            ds = make_dataset(phase, cfg)
+            loader = DataLoader(
+                ds,
+                batch_size=B,
+                num_workers=cfg.num_data_workers,
+                pin_memory=True,
+                prefetch_factor=2 if cfg.num_data_workers > 0 else None,
+                persistent_workers=cfg.num_data_workers > 0,
+            )
+            prefetcher = CudaPrefetcher(loader, device)
+            write_buf: deque[torch.Tensor] = deque(maxlen=cfg.n_write)
+            t0 = time.perf_counter()
 
+            for seq in prefetcher:
                 if step >= phase_end:
-                    phase_start = phase_end
-                    continue
+                    break
+                if main_proc and stop_event.is_set():  # type: ignore
+                    break
 
-                source = phase.get("dataset", "fineweb-edu")
-                T = phase["seq_len"]
-                if T % world_size != 0:
-                    raise ValueError(
-                        f"phase seq_len {T} must be divisible by world_size {world_size}"
-                    )
-                T_local = T // world_size
-                B = max(1, cfg.token_budget // T)
+                tokens = seq[:, :-1][:, rank * T_local : (rank + 1) * T_local]
+                targets = seq[:, 1:][:, rank * T_local : (rank + 1) * T_local]
+
+                write_chunks = None
+                if base_model.cam_enabled and len(write_buf) == cfg.n_write:
+                    write_chunks = torch.stack(list(write_buf), dim=1)
+                write_buf.append(tokens.clone())
+
+                loss = projected_step(
+                    model,  # type: ignore
+                    params,
+                    optimizer,
+                    tokens,
+                    targets,
+                    beta=cfg.beta_proj,
+                    precision=precision,
+                    write_chunks=write_chunks,
+                    sp_group=sp_group,
+                    grad_clip=cfg.grad_clip,
+                    accum_steps=cfg.accum_steps,
+                )
+
+                scheduler.step()
+                step += 1
 
                 if main_proc:
-                    monitor.set_phase(  # type: ignore
-                        f"{source}  seq_len={T}  B={B}  steps {phase_start}-{phase_end}"
-                    )
+                    state.step = step  # type: ignore
 
-                if phase.get("path"):
-                    _wait_for_file(phase["path"], rank)
-                ds = make_dataset(phase, cfg)
-                loader = DataLoader(
-                    ds,
-                    batch_size=B,
-                    num_workers=cfg.num_data_workers,
-                    pin_memory=True,
-                    prefetch_factor=2 if cfg.num_data_workers > 0 else None,
-                    persistent_workers=cfg.num_data_workers > 0,
-                )
-                prefetcher = CudaPrefetcher(loader, device)
-                write_buf: deque[torch.Tensor] = deque(maxlen=cfg.n_write)
-                t0 = time.perf_counter()
-
-                for seq in prefetcher:
-                    if step >= phase_end:
-                        break
-
-                    tokens = seq[:, :-1][:, rank * T_local : (rank + 1) * T_local]
-                    targets = seq[:, 1:][:, rank * T_local : (rank + 1) * T_local]
-
-                    write_chunks = None
-                    if base_model.cam_enabled and len(write_buf) == cfg.n_write:
-                        write_chunks = torch.stack(list(write_buf), dim=1)
-                    write_buf.append(tokens.clone())
-
-                    ctx = (
-                        freeze_sn_iteration(model) if step % 50 != 0 else nullcontext()  # type: ignore
-                    )  # type: ignore
-                    with ctx:
-                        loss = projected_step(
-                            model,  # type: ignore
-                            params,
-                            optimizer,
-                            tokens,
-                            targets,
-                            beta=cfg.beta_proj,
-                            precision=precision,
-                            write_chunks=write_chunks,
-                            sp_group=sp_group,
-                            grad_clip=cfg.grad_clip,
-                            accum_steps=cfg.accum_steps,
+                if main_proc and step % cfg.log_every == 0:
+                    dt = (time.perf_counter() - t0) / cfg.log_every
+                    lr_now = scheduler.get_last_lr()[0]  # type: ignore
+                    tps = B * T / dt
+                    state.loss = loss  # type: ignore
+                    state.lr = lr_now  # type: ignore
+                    state.tok_per_sec = tps  # type: ignore
+                    state.ms_per_step = dt * 1000  # type: ignore
+                    if cfg.project:
+                        wandb.log(  # type: ignore
+                            {
+                                "loss": loss,
+                                "lr": lr_now,
+                                "tok_per_sec": tps,
+                                "ms_per_step": dt * 1000,
+                            },
+                            step=step,
                         )
+                    t0 = time.perf_counter()
 
-                    scheduler.step()
-                    step += 1
+                if main_proc and step % cfg.ckpt_every == 0:
+                    path = ckpt_dir / f"step_{step:07d}.pt"
+                    save_ckpt(path, step, model, optimizer, scheduler)  # type: ignore
 
-                    if main_proc:
-                        monitor.tick(step)  # type: ignore
+                if main_proc and save_event.is_set():  # type: ignore
+                    save_event.clear()  # type: ignore
+                    path = ckpt_dir / f"step_{step:07d}_manual.pt"
+                    save_ckpt(path, step, model, optimizer, scheduler)  # type: ignore
 
-                    if main_proc and step % cfg.log_every == 0:
-                        dt = (time.perf_counter() - t0) / cfg.log_every
-                        lr_now = scheduler.get_last_lr()[0]  # type: ignore
-                        tps = B * T / dt
-                        monitor.log(  # type: ignore
-                            step,
-                            loss,
-                            lr_now,
-                            tps,
-                            dt * 1000,
-                            B * T,
-                        )
-                        if cfg.project:
-                            wandb.log(  # type: ignore
-                                {
-                                    "loss": loss,
-                                    "lr": lr_now,
-                                    "tok_per_sec": tps,
-                                    "ms_per_step": dt * 1000,
-                                },
-                                step=step,
-                            )
-                        t0 = time.perf_counter()
-
-                    if main_proc and step % cfg.ckpt_every == 0:
-                        path = ckpt_dir / f"step_{step:07d}.pt"
-                        save_ckpt(path, step, model, optimizer, scheduler)  # type: ignore
-                        console.log(f"checkpoint: {path}")  # type: ignore
-
-                phase_start = phase_end
-
-            if main_proc:
-                monitor.stop()  # type: ignore
+            if main_proc and stop_event.is_set():  # type: ignore
+                break
+            phase_start = phase_end
 
     finally:
         if main_proc:
             path = ckpt_dir / f"step_{step:07d}_final.pt"
             save_ckpt(path, step, model, optimizer, scheduler)  # type: ignore
-            console.log(f"final checkpoint: {path}")  # type: ignore
+            stop_event.set()  # type: ignore
             if cfg.project:
                 wandb.finish()  # type: ignore
             pynvml.nvmlShutdown()

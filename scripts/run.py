@@ -145,7 +145,9 @@ def main() -> None:
         print("[run] --prepare-only: all data ready, exiting.")
         return
 
-    # Write temp config with paths filled in
+    if args.resume:
+        cfg["resume"] = args.resume
+
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", delete=False, dir=ROOT
     ) as tmp:
@@ -169,9 +171,6 @@ def main() -> None:
             str(ROOT / "scripts" / "training.py"),
             "--config", tmp_config,
         ]
-
-    if args.resume:
-        launch += ["--resume", args.resume]
 
     training_proc: subprocess.Popen | None = None
     try:

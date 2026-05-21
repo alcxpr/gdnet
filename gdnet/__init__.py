@@ -1,4 +1,3 @@
-from .layer import freeze_sn_iteration
 from .utils import (
     Precision,
     autocast,
@@ -13,7 +12,6 @@ from .utils import (
 )
 
 __all__ = [
-    "freeze_sn_iteration",
     "autocast",
     "Precision",
     "init_distributed",
