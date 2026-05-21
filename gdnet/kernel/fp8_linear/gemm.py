@@ -692,10 +692,8 @@ class _Fp8GemmSM90:
 def _pick_tile(M: int, N: int) -> tuple[int, int]:
     ratio = M / N
     if ratio >= 4:
-        if N % 128 == 0 and M % 128 == 0:
-            return (128, 128)
-        if N % 64 == 0 and M % 128 == 0:
-            return (128, 64)
+        if N % 64 == 0 and M % 64 == 0:
+            return (64, 64)
     if N % 256 == 0 and M % 128 == 0:
         return (128, 256)
     if N % 128 == 0 and M % 128 == 0:
