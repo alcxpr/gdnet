@@ -44,8 +44,10 @@ def _make_fp8_pair(M: int, K: int, N: int, seed: int = 0):
     b = torch.randn(N, K, dtype=torch.bfloat16, device="cuda")  # type: ignore
     scale_a = FP8_MAX / a.float().abs().max().item()
     scale_b = FP8_MAX / b.float().abs().max().item()
-    a_fp8, _, _ = quantize_fp8(a, scale=scale_a)
-    b_fp8, _, _ = quantize_fp8(b, scale=scale_b)
+    scale_a_t = torch.tensor([scale_a], dtype=torch.float32, device=a.device)  # type: ignore
+    scale_b_t = torch.tensor([scale_b], dtype=torch.float32, device=b.device)  #  type: ignore
+    a_fp8, _, _ = quantize_fp8(a, scale=scale_a_t)
+    b_fp8, _, _ = quantize_fp8(b, scale=scale_b_t)
     inv_a = 1.0 / scale_a
     inv_b = 1.0 / scale_b
     return a_fp8.contiguous(), b_fp8.contiguous(), inv_a, inv_b

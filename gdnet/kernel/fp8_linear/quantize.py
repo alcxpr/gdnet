@@ -13,7 +13,7 @@ def _quantize_fp8_kernel(
     xr_ptr,
     xc_ptr,
     amax_ptr,
-    scale,
+    scale_ptr,
     M,
     K,
     stride_xm,
@@ -39,6 +39,7 @@ def _quantize_fp8_kernel(
 
     tl.atomic_max(amax_ptr, tl.max(tl.abs(x)))
 
+    scale = tl.load(scale_ptr)
     x_fp8 = tl.clamp(x * scale, -448.0, 448.0).to(tl.float8e4nv)
 
     tl.store(
@@ -57,7 +58,7 @@ def _quantize_fp8_kernel(
 
 def quantize_fp8(
     x: torch.Tensor,
-    scale: float = 1.0,
+    scale: torch.Tensor,
     need_col: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if torch.cuda.get_device_capability(x.device) < (9, 0):
@@ -70,7 +71,11 @@ def quantize_fp8(
     M, K = x.shape
 
     x_row = torch.empty(M, K, dtype=torch.float8_e4m3fn, device=x.device)  # type: ignore
-    x_col = torch.empty(K, M, dtype=torch.float8_e4m3fn, device=x.device) if need_col else x_row  # type: ignore
+    x_col = (
+        torch.empty(K, M, dtype=torch.float8_e4m3fn, device=x.device)  # type: ignore
+        if need_col
+        else x_row
+    )
     amax = torch.zeros(1, dtype=torch.float32, device=x.device)  # type: ignore
 
     BLOCK_M, BLOCK_K = 64, 64

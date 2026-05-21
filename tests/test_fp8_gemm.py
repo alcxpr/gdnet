@@ -18,7 +18,8 @@ def _make_fp8(shape: tuple[int, ...], seed: int = 0) -> tuple[torch.Tensor, floa
     torch.manual_seed(seed)
     x = torch.randn(*shape, dtype=torch.bfloat16, device="cuda")  # type: ignore
     scale = FP8_MAX / x.float().abs().max().item()
-    x_fp8, _, _ = quantize_fp8(x, scale=scale)
+    scale_t = torch.tensor([scale], dtype=torch.float32, device=x.device)
+    x_fp8, _, _ = quantize_fp8(x, scale=scale_t)
     inv_scale = 1.0 / scale
     return x_fp8.contiguous(), inv_scale
 
