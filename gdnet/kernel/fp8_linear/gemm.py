@@ -691,10 +691,6 @@ class _Fp8GemmSM90:
 
 
 def _pick_tile(M: int, N: int) -> tuple[int, int]:
-    ratio = M / N
-    if ratio >= 4:
-        if N % 64 == 0 and M % 128 == 0:
-            return (128, 64)
     if N % 256 == 0 and M % 128 == 0:
         return (128, 256)
     if N % 128 == 0 and M % 128 == 0:
@@ -706,17 +702,14 @@ def _pick_tile(M: int, N: int) -> tuple[int, int]:
 
 def _pick_swizzle(M: int, N: int, tile_mn: tuple[int, int]) -> tuple[int, bool]:
     ratio = M / N
-    raster_along_m = ratio <= 1
-    min_dim = min(M // tile_mn[0], N // tile_mn[1])
-    if min_dim >= 6:
-        swizzle = 8
-    elif min_dim >= 3:
-        swizzle = 4
-    elif min_dim >= 2:
-        swizzle = 2
-    else:
-        swizzle = 1
-    return swizzle, raster_along_m
+    raster_along_m = ratio > 1
+    m_tiles = M // tile_mn[0]
+    n_tiles = N // tile_mn[1]
+    minor = n_tiles if raster_along_m else m_tiles
+    for sw in [8, 4, 2, 1]:
+        if minor >= sw * 2:
+            return sw, raster_along_m
+    return 1, raster_along_m
 
 
 def fp8_gemm(

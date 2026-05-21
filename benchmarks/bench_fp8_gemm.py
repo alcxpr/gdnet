@@ -35,7 +35,7 @@ CONFIGS_TRAINING = [
 
 CONFIGS = CONFIGS_TRAINING
 
-H100_FP8_PEAK_TFLOPS = 1979.0
+H200_FP8_PEAK_TFLOPS = 3958.0
 
 
 def _make_fp8_pair(M: int, K: int, N: int, seed: int = 0):
@@ -68,7 +68,7 @@ def bench_fp8_gemm():
             rep=100,
         )
         tflops = _flops(M, N, K) / ms * 1e-9  # type: ignore
-        util = tflops / H100_FP8_PEAK_TFLOPS * 100.0
+        util = tflops / H200_FP8_PEAK_TFLOPS * 100.0
         print(f"{M:>6} {N:>6} {K:>6}  {ms:>8.3f}  {tflops:>10.1f}  {util:>7.1f}")
 
 
