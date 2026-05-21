@@ -6,10 +6,9 @@ import triton
 
 from .kernel.gated_causal_depthwise_conv import (
     CausalDWConvFunction,
-    CausalDWConvFunctionSP,
     gated_output,
 )
-from .utils.sp import SPHaloExchange
+from .utils.sp import FusedHaloConvSP, begin_halo_recv
 
 
 class CausalDepthWiseConv1d(nn.Module):
@@ -116,16 +115,29 @@ class GDLayer(nn.Module):
         fwd: torch.Tensor,
         conv_module: CausalDepthWiseConv1d,
         sp_group: dist.ProcessGroup,
+        pending_recv: tuple | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """SP variant: halo exchange then Triton conv, return (conv_3d, conv_flat)."""
+        """SP variant: fused halo exchange + Triton conv, return (conv_3d, conv_flat).
+
+        pending_recv, if provided, is (x_dt, edge, halo_dt, work) from a prior
+        begin_halo_recv call. x_dt and edge are reused directly; work is waited on
+        before the conv. If None, the recv is issued and waited on here.
+        """
         B, T, d = fwd.shape
         k = conv_module.size
         BLOCK_T = min(triton.next_power_of_2(T), 64)
-        x_dt = fwd.permute(0, 2, 1).contiguous()
         W_conv = conv_module.conv.weight.squeeze(1)
-        edge = x_dt[:, :, -(k - 1) :].contiguous()
-        halo_dt = SPHaloExchange.apply(edge, sp_group)
-        conv_out_dt = CausalDWConvFunctionSP.apply(x_dt, halo_dt, W_conv, T, k, BLOCK_T)
+
+        if pending_recv is not None:
+            x_dt, _edge, halo_dt, work = pending_recv
+        else:
+            x_dt = fwd.permute(0, 2, 1).contiguous()
+            _edge, halo_dt, work = begin_halo_recv(x_dt, k, sp_group)
+
+        for req in work:
+            req.wait()
+
+        conv_out_dt = FusedHaloConvSP.apply(x_dt, halo_dt, W_conv, T, k, BLOCK_T, sp_group)
         conv_3d = conv_out_dt.permute(0, 2, 1).contiguous()  # type: ignore
         return conv_3d, conv_3d.view(B * T, d)
 
@@ -158,6 +170,7 @@ class GDLayer(nn.Module):
         fwd: torch.Tensor,
         side: torch.Tensor,
         sp_group: dist.ProcessGroup,
+        pending_recv: tuple | None = None,
         return_gate: bool = False,
     ) -> tuple[torch.Tensor, ...]:
         """SP variant of fwd_step: performs halo exchange before the causal conv.
@@ -172,7 +185,7 @@ class GDLayer(nn.Module):
             (fwd_out, side_out) or (fwd_out, side_out, gate) if return_gate.
         """
         B, T, d = fwd.shape
-        conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_fwd, sp_group)
+        conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_fwd, sp_group, pending_recv)
         R = self._recovery("rf", side, conv_3d)
         fwd_out, side_out = gated_output(
             conv_flat,
@@ -217,6 +230,7 @@ class GDLayer(nn.Module):
         fwd: torch.Tensor,
         side: torch.Tensor,
         sp_group: dist.ProcessGroup,
+        pending_recv: tuple | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """SP variant of bwd_step: performs halo exchange before the causal conv.
 
@@ -229,7 +243,7 @@ class GDLayer(nn.Module):
             (fwd_out, side_out).
         """
         B, T, d = fwd.shape
-        conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_bwd, sp_group)
+        conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_bwd, sp_group, pending_recv)
         R = self._recovery("rb", side, conv_3d)
         fwd_out, side_out = gated_output(
             conv_flat,
