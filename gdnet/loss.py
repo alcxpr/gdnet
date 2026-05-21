@@ -69,13 +69,15 @@ def build_cam_buffer(
         `(buffer_tags, buffer_vals)` ready to pass into `model.forward`.
     """
     raw = getattr(model, "module", model)
+    raw = getattr(raw, "_orig_mod", raw)
+    raw = getattr(raw, "module", raw)
     B, n_write, _ = write_chunks.shape
     device = write_chunks.device
     btags = torch.zeros(B, raw.cam.n_slots, raw.cam.d_sig, device=device)  # type: ignore
     bvals = torch.zeros(B, raw.cam.n_slots, raw.cam.d_c, device=device)  # type: ignore
     with torch.no_grad():
         for i in range(n_write):
-            _, side, _, _, _, _, fwd_last = model(
+            _, side, _, _, _, _, fwd_last = raw(
                 write_chunks[:, i], btags, bvals, sp_group=sp_group
             )
             btags, bvals = raw.write_cam(fwd_last, side, btags, bvals)  # type: ignore
