@@ -400,7 +400,9 @@ def main() -> None:
 
     base_model: GDNet = getattr(model, "module", model)  # type: ignore
 
-    optimizer = torch.optim.AdamW(
+    import bitsandbytes as bnb
+
+    optimizer = bnb.optim.AdamW8bit(
         model.parameters(),  # type: ignore
         lr=cfg.lr,
         betas=(cfg.beta1, cfg.beta2),
