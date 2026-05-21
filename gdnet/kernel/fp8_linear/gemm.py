@@ -298,7 +298,6 @@ class _Fp8GemmSM90:
         )
         consumer_arrive_cnt = (
             (self.num_mcast_ctas_a + self.num_mcast_ctas_b - 1)
-            * self.num_mma_warp_groups
             * self.num_warps_per_warp_group
         )
         mainloop_pipeline_consumer_group = pipeline.CooperativeGroup(
@@ -443,11 +442,6 @@ class _Fp8GemmSM90:
             mainloop_consumer_release_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Consumer, self.ab_stage
             )
-
-            if consumer_wg_idx == 1:
-                for _ in range(k_tile_cnt):
-                    mainloop_consumer_read_state.advance()
-                    mainloop_consumer_release_state.advance()
 
             num_k_blocks = cute.size(tCrA, mode=[2])  # type: ignore
 
