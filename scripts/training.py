@@ -379,7 +379,7 @@ def main() -> None:
         convert_to_fp8(model)
 
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], static_graph=True)  # type: ignore
+        model = DDP(model, device_ids=[local_rank], static_graph=True, bucket_cap_mb=200)  # type: ignore
 
     if cfg.compile:
         torch._functorch.config.donated_buffer = False

@@ -84,7 +84,7 @@ def run(
         model.embed.weight.data = model.embed.weight.data.bfloat16()  # type: ignore
         convert_to_fp8(model)
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], static_graph=True)  # type: ignore
+        model = DDP(model, device_ids=[local_rank], static_graph=True, bucket_cap_mb=200)  # type: ignore
     if compile_model:
         torch._functorch.config.donated_buffer = False
         torch._dynamo.config.allow_unspec_int_on_nn_module = True

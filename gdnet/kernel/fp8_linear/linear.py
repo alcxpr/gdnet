@@ -89,7 +89,7 @@ class FP8Linear(nn.Module):
         dev = linear.weight.device
         self.register_buffer("scale_x", torch.ones(1, device=dev))  # type: ignore
         self.register_buffer("scale_w", torch.ones(1, device=dev))  # type: ignore
-        self.register_buffer("_step", torch.zeros(1, dtype=torch.int32, device=dev))  # type: ignore
+        self._step: int = 0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shape = x.shape
@@ -105,7 +105,7 @@ class FP8Linear(nn.Module):
                 self.scale_x.fill_(FP8_MAX / amax[0].clamp(min=1e-12))  # type: ignore
                 self.scale_w.fill_(FP8_MAX / amax[1].clamp(min=1e-12))  # type: ignore
 
-        self._step.add_(1)  # type: ignore
+        self._step += 1
 
         out = _Fp8LinearFn.apply(
             x_flat,
