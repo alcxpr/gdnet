@@ -81,7 +81,10 @@ class FP8Linear(nn.Module):
     def __init__(self, linear: nn.Linear, scale_update_freq: int = 16):
         super().__init__()
         self.weight = nn.Parameter(linear.weight.data)
-        self.bias = linear.bias
+        self.register_parameter(
+            "bias",
+            nn.Parameter(linear.bias.data) if linear.bias is not None else None,
+        )
         self.scale_update_freq = scale_update_freq
         dev = linear.weight.device
         self.register_buffer("scale_x", torch.ones(1, device=dev))  # type: ignore
