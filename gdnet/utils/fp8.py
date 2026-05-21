@@ -61,4 +61,8 @@ def convert_to_fp8(model: nn.Module) -> nn.Module:
             if not (fqn.startswith("cam.") or ".cam." in fqn):
                 mod.weight.data = mod.weight.data.bfloat16()
 
+    cam = getattr(model, "cam", None)
+    if cam is not None:
+        cam.bfloat16()
+
     return model
