@@ -56,8 +56,9 @@ def convert_to_fp8(model: nn.Module) -> nn.Module:
         if "weight_orig" in mod._parameters:
             mod.bfloat16()
 
-    for mod in model.modules():
+    for fqn, mod in model.named_modules():
         if isinstance(mod, nn.RMSNorm) and mod.weight is not None:
-            mod.weight.data = mod.weight.data.bfloat16()
+            if not (fqn.startswith("cam.") or ".cam." in fqn):
+                mod.weight.data = mod.weight.data.bfloat16()
 
     return model
