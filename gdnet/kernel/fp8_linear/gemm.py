@@ -63,10 +63,10 @@ class _Fp8GemmSM90:
         )
         self.mma_barriers = [
             pipeline.NamedBarrier(
-                barrier_id=1, num_threads=self.num_threads_per_warp_group
+                barrier_id=1, num_threads=self.num_mma_threads
             ),
             pipeline.NamedBarrier(
-                barrier_id=2, num_threads=self.num_threads_per_warp_group
+                barrier_id=2, num_threads=self.num_mma_threads
             ),
         ]
         self.epi_barriers = [
@@ -485,6 +485,9 @@ class _Fp8GemmSM90:
 
             scale_val = scale_a[0] * scale_b[0]  # type: ignore
 
+            if consumer_wg_idx == 1:
+                self.mma_barriers[0].arrive()
+
             while work_tile.is_valid_tile:
                 tile_coord_mn = work_tile.tile_idx
                 gD_mn_slice = gD_mn[(None, None, tile_coord_mn[0], tile_coord_mn[1])]
@@ -608,11 +611,6 @@ class _Fp8GemmSM90:
                         self.epi_barriers[0].arrive_and_wait()
                     else:
                         self.epi_barriers[1].arrive_and_wait()
-
-                if consumer_wg_idx == 0:
-                    self.epi_barriers[1].arrive()
-                else:
-                    self.epi_barriers[0].arrive()
 
                 tile_sched.advance_to_next_work()
                 if work_tile.is_valid_tile:
