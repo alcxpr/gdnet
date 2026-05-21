@@ -719,11 +719,8 @@ def _pick_tile(M: int, N: int) -> tuple[int, int]:
 
 def _pick_swizzle(M: int, N: int) -> tuple[int, bool]:
     ratio = M / N
-    if ratio >= 4:
-        return 4, False  # tall-skinny: N-major raster + swizzle for L2 reuse
-    if ratio <= 0.25:
-        return 4, True  # wide: M-major raster + swizzle
-    return 1, True  # square-ish: default
+    raster_along_m = ratio <= 1
+    return 1, raster_along_m
 
 
 def fp8_gemm(
@@ -739,7 +736,7 @@ def fp8_gemm(
     assert b.dtype == torch.float8_e4m3fn  # type: ignore
     assert a.is_contiguous() and b.is_contiguous()
     M, K = a.shape
-    N, K2 = b.shape
+    K2, N = b.shape
     assert K == K2
     assert K % 16 == 0, "K must be a multiple of 16 for FP8 TMA alignment"
     assert M % 64 == 0 and N % 64 == 0, "M and N must be multiples of 64"

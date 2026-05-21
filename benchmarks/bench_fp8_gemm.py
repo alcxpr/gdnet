@@ -48,7 +48,7 @@ def _make_fp8_pair(M: int, K: int, N: int, seed: int = 0):
     b_fp8, _, _ = quantize_fp8(b, scale=scale_b)
     inv_a = 1.0 / scale_a
     inv_b = 1.0 / scale_b
-    return a_fp8.contiguous(), b_fp8.contiguous(), inv_a, inv_b
+    return a_fp8.contiguous(), b_fp8.T.contiguous(), inv_a, inv_b
 
 
 def _flops(M: int, N: int, K: int) -> float:
