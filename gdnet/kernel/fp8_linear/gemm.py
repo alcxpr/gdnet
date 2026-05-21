@@ -451,7 +451,7 @@ class _Fp8GemmSM90:
                 if work_tile.is_valid_tile:
                     tile_sched.advance_to_next_work()
                     work_tile = tile_sched.get_current_work()
-                for _ in cutlass.range_constexpr(k_tile_cnt):  # type: ignore
+                for _ in range(k_tile_cnt):
                     mainloop_consumer_read_state.advance()
                     mainloop_consumer_release_state.advance()
                 self.mma_order_barriers[0].arrive()
@@ -563,7 +563,7 @@ class _Fp8GemmSM90:
                 else:
                     self.mma_order_barriers[0].arrive()
 
-                for _ in cutlass.range_constexpr(k_tile_cnt):  # type: ignore
+                for _ in range(k_tile_cnt):
                     mainloop_consumer_read_state.advance()
                     mainloop_consumer_release_state.advance()
 
