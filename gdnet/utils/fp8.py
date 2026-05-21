@@ -52,8 +52,4 @@ def convert_to_fp8(model: nn.Module) -> nn.Module:
         attr = parts[-1]
         setattr(parent, attr, FP8Linear(mod))  # type: ignore
 
-    for mod in model.modules():
-        if isinstance(mod, nn.RMSNorm) and mod.weight is not None:
-            mod.weight.data = mod.weight.data.bfloat16()
-
     return model

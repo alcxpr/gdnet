@@ -45,7 +45,7 @@ class _Fp8LinearFn(torch.autograd.Function):
     def backward(ctx, grad_out: torch.Tensor):  # type: ignore
         x_fp8_col, w_fp8_col, scale_x, scale_w = ctx.saved_tensors
 
-        grad_out = grad_out.contiguous()
+        grad_out = grad_out.contiguous().bfloat16()
         with torch.no_grad():
             amax_go = grad_out.float().abs().amax()
             scale_go = (FP8_MAX / amax_go.clamp(min=1e-12)).unsqueeze(0)
