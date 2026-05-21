@@ -577,6 +577,7 @@ class _Fp8GemmSM90:
         ab_stage = (
             smem_capacity // occupancy - (mbar_bytes + epi_bytes)
         ) // ab_bytes_per_stage
+        ab_stage = min(ab_stage, 8)  # We cap to avoid alignment overrun here.
         return ab_stage, epi_stage
 
     @staticmethod
@@ -692,8 +693,8 @@ class _Fp8GemmSM90:
 def _pick_tile(M: int, N: int) -> tuple[int, int]:
     ratio = M / N
     if ratio >= 4:
-        if N % 64 == 0 and M % 64 == 0:
-            return (64, 64)
+        if N % 64 == 0 and M % 128 == 0:
+            return (128, 64)
     if N % 256 == 0 and M % 128 == 0:
         return (128, 256)
     if N % 128 == 0 and M % 128 == 0:
@@ -731,12 +732,12 @@ def fp8_gemm(
     assert b.dtype == torch.float8_e4m3fn  # type: ignore
     assert a.is_contiguous() and b.is_contiguous()
     M, K = a.shape
-    K2, N = b.shape
+    N, K2 = b.shape
     assert K == K2
     assert K % 16 == 0, "K must be a multiple of 16 for FP8 TMA alignment"
     assert M % 64 == 0 and N % 64 == 0, "M and N must be multiples of 64"
 
-    d = torch.zeros(M, N, dtype=torch.bfloat16, device=a.device)  # type: ignore
+    d = torch.empty(M, N, dtype=torch.bfloat16, device=a.device)  # type: ignore
 
     scale_a = torch.tensor([inv_scale_a], dtype=torch.float32, device=a.device)  # type: ignore
     scale_b = torch.tensor([inv_scale_b], dtype=torch.float32, device=b.device)  # type: ignore

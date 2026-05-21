@@ -25,7 +25,7 @@ def _make_fp8(shape: tuple[int, ...], seed: int = 0) -> tuple[torch.Tensor, floa
 
 def _make_fp8_b(K: int, N: int, seed: int = 0) -> tuple[torch.Tensor, float]:
     x_fp8, inv_scale = _make_fp8((N, K), seed=seed)
-    return x_fp8.T.contiguous(), inv_scale
+    return x_fp8, inv_scale
 
 
 def _reference(
@@ -34,7 +34,7 @@ def _reference(
     inv_scale_a: float,
     inv_scale_b: float,
 ) -> torch.Tensor:
-    return ((a_fp8.float() @ b_fp8.float()) * inv_scale_a * inv_scale_b).to(
+    return ((a_fp8.float() @ b_fp8.float().T) * inv_scale_a * inv_scale_b).to(
         torch.bfloat16  # type: ignore
     )
 
@@ -97,5 +97,5 @@ def test_forward_wgrad_interface(M, N, K):
     fwd = fp8_gemm(x_fp8, w_col_fp8, inv_x, inv_w)
     assert fwd.shape == (M, N)
 
-    wgrad = fp8_gemm(w_col_fp8.T.contiguous(), x_col_fp8, inv_w, inv_x)
+    wgrad = fp8_gemm(w_col_fp8, x_col_fp8.T.contiguous(), inv_w, inv_x)
     assert wgrad.shape == (N, M)
