@@ -94,6 +94,7 @@ def projected_step(
     write_chunks: torch.Tensor | None = None,
     sp_group: dist.ProcessGroup | None = None,
     grad_clip: float = 0.0,
+    accum_steps: int = 1,
 ) -> float:
     """Single training step with projected gradient optimization.
 
@@ -120,68 +121,99 @@ def projected_step(
         write_chunks: Optional write-chunk token ids `(B, n_write, T)`. When provided
             and `model.cam_enabled`, the CAM buffer is populated via sequential writes
             before each forward pass so CAM parameters receive training gradients.
+        accum_steps: Number of gradient accumulation micro-batches. Tokens and targets
+            are split along the batch dimension; losses are scaled by 1/accum_steps so
+            the effective gradient matches a single full-batch forward pass.
 
     Returns:
         Task loss value for this step.
     """
-    optimizer.zero_grad()
     base_model = getattr(model, "module", model)
-    with make_autocast(precision):  # type: ignore
-        btags, bvals = (
-            build_cam_buffer(model, write_chunks, sp_group=sp_group)
-            if write_chunks is not None and base_model.cam_enabled  # type: ignore
-            else (None, None)
-        )
-        logits, side, _, _, gate_vals, _, _ = model(
-            tokens, btags, bvals, return_gates=True, sp_group=sp_group
-        )
-        loss_task = F.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]), targets.reshape(-1)
-        )
-
     no_sync = getattr(model, "no_sync", contextlib.nullcontext)
 
-    with no_sync():
-        if scaler:
-            scaler.scale(loss_task).backward(retain_graph=True)
-        else:
-            loss_task.backward(retain_graph=True)
-    g_task = [
-        p.grad.clone() if p.grad is not None else torch.zeros_like(p)  # type: ignore
-        for p in params
-    ]
+    B = tokens.shape[0]
+    assert B % accum_steps == 0, (
+        f"batch size {B} not divisible by accum_steps {accum_steps}"
+    )
+    mb = B // accum_steps
+
+    g_task = [torch.zeros_like(p) for p in params]  # type: ignore
+    g_info = [torch.zeros_like(p) for p in params]  # type: ignore
+    total_loss = 0.0
 
     optimizer.zero_grad()
-    with make_autocast(precision):  # type: ignore
-        loss_info_base = gate_info_loss_from_vals(gate_vals, base_model.n_layers)  # type: ignore
-        if base_model.layers:
-            loss_info_base = loss_info_base + sn_soft_penalty(base_model.layers)  # type: ignore
-        if base_model.cam_enabled:
-            loss_info_base = loss_info_base + 0.1 * base_model.cam.recon_loss(  # type: ignore
-                side[0].mean(dim=1)
-            )
-    with no_sync():
-        if scaler:
-            scaler.scale(loss_info_base).backward()
-        else:
-            loss_info_base.backward()
 
-    if base_model.trans_enabled and tokens.shape[1] >= 2:
+    for i in range(accum_steps):
+        tok_i = tokens[i * mb : (i + 1) * mb]
+        tgt_i = targets[i * mb : (i + 1) * mb]
+        wc_i = write_chunks[i * mb : (i + 1) * mb] if write_chunks is not None else None
+
         with make_autocast(precision):  # type: ignore
-            mid = tokens.shape[1] // 2
-            z_t = side[0][:, :mid].mean(dim=1)
-            z_t1 = side[0][:, mid:].mean(dim=1).detach()
-            loss_trans = 0.1 * base_model.trans_ops.loss(z_t, z_t1)  # type: ignore
+            btags, bvals = (
+                build_cam_buffer(model, wc_i, sp_group=sp_group)
+                if wc_i is not None and base_model.cam_enabled  # type: ignore
+                else (None, None)
+            )
+            logits, side, _, _, gate_vals, _, _ = model(
+                tok_i, btags, bvals, return_gates=True, sp_group=sp_group
+            )
+            loss_task = (
+                F.cross_entropy(logits.reshape(-1, logits.shape[-1]), tgt_i.reshape(-1))
+                / accum_steps
+            )
+
         with no_sync():
             if scaler:
-                scaler.scale(loss_trans).backward()
+                scaler.scale(loss_task).backward(retain_graph=True)
             else:
-                loss_trans.backward()
+                loss_task.backward(retain_graph=True)
 
-    g_info = [
-        p.grad.clone() if p.grad is not None else torch.zeros_like(p)  # type: ignore
-        for p in params
-    ]
+        for acc, p in zip(g_task, params):
+            if p.grad is not None:
+                acc.add_(p.grad)
+
+        optimizer.zero_grad()
+
+        with make_autocast(precision):  # type: ignore
+            loss_info = (
+                gate_info_loss_from_vals(gate_vals, base_model.n_layers) / accum_steps  # type: ignore
+            )
+            if base_model.layers:  # type: ignore
+                loss_info = loss_info + sn_soft_penalty(base_model.layers) / accum_steps  # type: ignore
+            if base_model.cam_enabled:  # type: ignore
+                loss_info = (
+                    loss_info
+                    + 0.1
+                    * base_model.cam.recon_loss(  # type: ignore
+                        side[0].mean(dim=1)
+                    )
+                    / accum_steps
+                )
+
+        with no_sync():
+            if scaler:
+                scaler.scale(loss_info).backward()
+            else:
+                loss_info.backward()
+
+        if base_model.trans_enabled and tok_i.shape[1] >= 2:  # type: ignore
+            with make_autocast(precision):  # type: ignore
+                mid = tok_i.shape[1] // 2
+                z_t = side[0][:, :mid].mean(dim=1)
+                z_t1 = side[0][:, mid:].mean(dim=1).detach()
+                loss_trans = 0.1 * base_model.trans_ops.loss(z_t, z_t1) / accum_steps  # type: ignore
+            with no_sync():
+                if scaler:
+                    scaler.scale(loss_trans).backward()
+                else:
+                    loss_trans.backward()
+
+        for acc, p in zip(g_info, params):
+            if p.grad is not None:
+                acc.add_(p.grad)
+
+        optimizer.zero_grad()
+        total_loss += loss_task.item()
 
     denom = torch.zeros((), device=params[0].device, dtype=torch.float32)  # type: ignore
     proj_coef_num = torch.zeros((), device=params[0].device, dtype=torch.float32)  # type: ignore
@@ -193,7 +225,6 @@ def projected_step(
         dist.all_reduce(proj_coef_num)
     proj_coef = proj_coef_num / denom.clamp(min=1e-8)
 
-    optimizer.zero_grad()
     for p, gt, gi in zip(params, g_task, g_info):
         p.grad = gt + beta * (gi - proj_coef * gt)
 
@@ -215,4 +246,4 @@ def projected_step(
     else:
         optimizer.step()
 
-    return loss_task.item()
+    return total_loss

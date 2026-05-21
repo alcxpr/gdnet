@@ -14,7 +14,7 @@ dependencies = [
     "torch==2.11.0",
     "torchao==0.17.0",
     "nvidia-cutlass-dsl>=4.5.1",
-    "modal>=1.4.3",
+    "bitsandbytes>=0.49.2",
 ]
 
 [tool.uv.sources]
@@ -36,4 +36,5 @@ dev = [
     "pytest==9.0.3",
     "pyperf==2.10.0",
     "matplotlib==3.10.9",
+    "modal==1.4.3",
 ]

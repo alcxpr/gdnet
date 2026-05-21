@@ -74,6 +74,7 @@ class Config:
     beta2: float = 0.95
     grad_clip: float = 1.0
     beta_proj: float = 0.1
+    accum_steps: int = 1
     # WSD schedule
     warmup_steps: int = 2_000
     decay_start: int = 80_000
@@ -515,6 +516,7 @@ def main() -> None:
                             write_chunks=write_chunks,
                             sp_group=sp_group,
                             grad_clip=cfg.grad_clip,
+                            accum_steps=cfg.accum_steps,
                         )
 
                     scheduler.step()
