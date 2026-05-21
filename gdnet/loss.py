@@ -190,13 +190,14 @@ def projected_step(
                     / accum_steps
                 )
 
+        need_trans = base_model.trans_enabled and tok_i.shape[1] >= 2  # type: ignore
         with no_sync():
             if scaler:
-                scaler.scale(loss_info).backward()
+                scaler.scale(loss_info).backward(retain_graph=need_trans)
             else:
-                loss_info.backward()
+                loss_info.backward(retain_graph=need_trans)
 
-        if base_model.trans_enabled and tok_i.shape[1] >= 2:  # type: ignore
+        if need_trans:
             with make_autocast(precision):  # type: ignore
                 mid = tok_i.shape[1] // 2
                 z_t = side[0][:, :mid].mean(dim=1)

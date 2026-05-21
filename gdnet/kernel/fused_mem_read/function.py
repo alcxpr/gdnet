@@ -57,6 +57,7 @@ class FusedMemReadFunction(torch.autograd.Function):
         )
 
 
+@torch.compiler.disable
 def fused_mem_read(
     q: torch.Tensor,
     gamma: torch.Tensor,
