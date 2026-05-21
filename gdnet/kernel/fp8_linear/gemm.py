@@ -717,10 +717,19 @@ def _pick_tile(M: int, N: int) -> tuple[int, int]:
     return (128, 128)
 
 
-def _pick_swizzle(M: int, N: int) -> tuple[int, bool]:
+def _pick_swizzle(M: int, N: int, tile_mn: tuple[int, int]) -> tuple[int, bool]:
     ratio = M / N
     raster_along_m = ratio <= 1
-    return 1, raster_along_m
+    min_dim = min(M // tile_mn[0], N // tile_mn[1])
+    if min_dim >= 6:
+        swizzle = 8
+    elif min_dim >= 3:
+        swizzle = 4
+    elif min_dim >= 2:
+        swizzle = 2
+    else:
+        swizzle = 1
+    return swizzle, raster_along_m
 
 
 def fp8_gemm(
@@ -753,7 +762,7 @@ def fp8_gemm(
     scale_b_cute = _to_cute(scale_b, cutlass.Float32)
 
     tile_mn = _pick_tile(M, N)
-    swizzle_size, raster_along_m = _pick_swizzle(M, N)
+    swizzle_size, raster_along_m = _pick_swizzle(M, N, tile_mn)
     key = (M, N, K, tile_mn, swizzle_size, raster_along_m)
     if key not in _kernel_cache:
         hw = cutlass.utils.HardwareInfo()
