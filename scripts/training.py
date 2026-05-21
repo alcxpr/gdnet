@@ -78,10 +78,7 @@ class Config:
     # WSD schedule
     warmup_steps: int = 2_000
     decay_start: int = 80_000
-    # curriculum
     phases: list[dict[str, Any]] = dataclasses.field(default_factory=list)
-    cam_start: int = 10_000
-    trans_start: int = 20_000
     n_write: int = 4
     # precision / compile
     precision: str = "bf16"
@@ -421,11 +418,6 @@ def main() -> None:
 
     ckpt_dir = Path(cfg.ckpt_dir)
 
-    if step >= cfg.cam_start:
-        base_model.cam_enabled = True
-    if step >= cfg.trans_start:
-        base_model.trans_enabled = True
-
     if main_proc:
         pynvml.nvmlInit()
         handles = [
@@ -489,11 +481,6 @@ def main() -> None:
                 for seq in prefetcher:
                     if step >= phase_end:
                         break
-
-                    if step == cfg.cam_start and not base_model.cam_enabled:
-                        base_model.cam_enabled = True
-                    if step == cfg.trans_start and not base_model.trans_enabled:
-                        base_model.trans_enabled = True
 
                     tokens = seq[:, :-1][:, rank * T_local : (rank + 1) * T_local]
                     targets = seq[:, 1:][:, rank * T_local : (rank + 1) * T_local]

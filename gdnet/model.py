@@ -68,8 +68,8 @@ class GDNet(nn.Module):
         self.n_layers = n_layers
         self.n_cycles = n_cycles
         self.chunk_size = chunk_size
-        self.cam_enabled = False
-        self.trans_enabled = False
+        self.cam_enabled = True
+        self.trans_enabled = True
 
     def one_cycle(
         self,
