@@ -57,7 +57,7 @@ class _Fp8LinearFn(torch.autograd.Function):
 class FP8Linear(nn.Module):
     def __init__(self, linear: nn.Linear, scale_update_freq: int = 16):
         super().__init__()
-        self.weight = nn.Parameter(linear.weight.data)
+        self.weight = nn.Parameter(linear.weight.data.bfloat16())
         self.register_parameter(
             "bias",
             nn.Parameter(linear.bias.data) if linear.bias is not None else None,
@@ -86,7 +86,7 @@ class FP8Linear(nn.Module):
 
         out = _Fp8LinearFn.apply(
             x_flat,
-            self.weight.bfloat16(),
+            self.weight,
             self.scale_x,
             self.scale_w,
         )
