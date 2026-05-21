@@ -382,10 +382,11 @@ def main() -> None:
         n_slots=cfg.n_slots,
     ).cuda()
 
-    if precision in ("bf16", "fp8"):
+    if precision == "bf16":
         model.to(torch.bfloat16)  # type: ignore
 
     if precision == "fp8":
+        model.embed.weight.data = model.embed.weight.data.bfloat16()  # type: ignore
         convert_to_fp8(model)
 
     if world_size > 1:

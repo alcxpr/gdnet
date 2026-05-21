@@ -79,9 +79,10 @@ def run(
     device = torch.device(f"cuda:{local_rank}")  # type: ignore
 
     model = make_model(T_local)
-    if precision in ("bf16", "fp8"):
+    if precision == "bf16":
         model.to(torch.bfloat16)  # type: ignore
     if precision == "fp8":
+        model.embed.weight.data = model.embed.weight.data.bfloat16()  # type: ignore
         convert_to_fp8(model)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], static_graph=True)  # type: ignore

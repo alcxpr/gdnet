@@ -17,6 +17,8 @@ class _Fp8LinearFn(torch.autograd.Function):
         scale_w: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
+        ctx.w_dtype = w.dtype
+        w = w.bfloat16()  # type: ignore
         x_fp8, x_fp8_col, _ = quantize_fp8(x, scale=scale_x, need_col=True)
         w_fp8, w_fp8_col, _ = quantize_fp8(w, scale=scale_w, need_col=True)
         # x_fp8     [M, K] row-major  (stride (K, 1))
@@ -72,7 +74,7 @@ class _Fp8LinearFn(torch.autograd.Function):
         )
 
         grad_bias = grad_out.sum(0) if ctx.has_bias else None
-        return dgrad, wgrad, None, None, grad_bias
+        return dgrad, wgrad.to(ctx.w_dtype), None, None, grad_bias
 
 
 class FP8Linear(nn.Module):
@@ -88,7 +90,7 @@ class FP8Linear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shape = x.shape
-        x_flat = x.reshape(-1, shape[-1])
+        x_flat = x.reshape(-1, shape[-1]).bfloat16()
 
         if self._step % self.scale_update_freq == 0:  # type: ignore
             with torch.no_grad():
