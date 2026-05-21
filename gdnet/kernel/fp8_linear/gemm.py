@@ -38,11 +38,9 @@ class _Fp8GemmSM90:
         self.swizzle_size = swizzle_size
         self.raster_along_m = raster_along_m
         self.tile_shape_mnk = (*tile_shape_mn, 1)
-        self.atom_layout_mnk = (
-            (2, 1, 1) if tile_shape_mn[0] > 64 and tile_shape_mn[1] > 128 else (1, 1, 1)
-        )
+        self.atom_layout_mnk = (1, 1, 1)
         self.num_dma_warp_groups = 1
-        self.num_mma_warp_groups = math.prod(self.atom_layout_mnk)
+        self.num_mma_warp_groups = 2
         self.num_warps_per_warp_group = 4
         self.num_threads_per_warp_group = self.num_warps_per_warp_group * 32
         self.threads_per_cta = (
@@ -63,9 +61,22 @@ class _Fp8GemmSM90:
         self.num_mma_threads = (
             self.num_mma_warp_groups * self.num_threads_per_warp_group
         )
-        self.epilog_sync_barrier = pipeline.NamedBarrier(
-            barrier_id=1, num_threads=self.num_mma_threads
-        )
+        self.mma_barriers = [
+            pipeline.NamedBarrier(
+                barrier_id=1, num_threads=self.num_threads_per_warp_group
+            ),
+            pipeline.NamedBarrier(
+                barrier_id=2, num_threads=self.num_threads_per_warp_group
+            ),
+        ]
+        self.epi_barriers = [
+            pipeline.NamedBarrier(
+                barrier_id=3, num_threads=self.num_threads_per_warp_group
+            ),
+            pipeline.NamedBarrier(
+                barrier_id=4, num_threads=self.num_threads_per_warp_group
+            ),
+        ]
         self.num_mcast_ctas_a = cluster_shape_mn[1]
         self.num_mcast_ctas_b = cluster_shape_mn[0]
         self.is_a_mcast = self.num_mcast_ctas_a > 1
@@ -104,7 +115,7 @@ class _Fp8GemmSM90:
         )
 
         self.cta_layout_mnk = cute.make_layout((*self.cluster_shape_mn, 1))
-        is_cooperative = self.atom_layout_mnk == (2, 1, 1)
+        is_cooperative = False
         self.epi_tile = self._compute_epi_tile(
             self.tile_shape_mnk, self.c_dtype, is_cooperative
         )
@@ -248,6 +259,10 @@ class _Fp8GemmSM90:
     ):
         tidx, _, _ = cute.arch.thread_idx()
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        warp_group_idx = cute.arch.make_warp_uniform(
+            tidx // self.num_threads_per_warp_group
+        )
+        local_tidx = tidx % self.num_threads_per_warp_group
 
         if warp_idx == 0:
             cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_a)
@@ -281,9 +296,10 @@ class _Fp8GemmSM90:
         mainloop_pipeline_producer_group = pipeline.CooperativeGroup(
             pipeline.Agent.Thread
         )
-        mcast_size = self.num_mcast_ctas_a + self.num_mcast_ctas_b - 1
         consumer_arrive_cnt = (
-            mcast_size * self.num_mma_warp_groups * self.num_warps_per_warp_group
+            (self.num_mcast_ctas_a + self.num_mcast_ctas_b - 1)
+            * self.num_mma_warp_groups
+            * self.num_warps_per_warp_group
         )
         mainloop_pipeline_consumer_group = pipeline.CooperativeGroup(
             pipeline.Agent.Thread, consumer_arrive_cnt
@@ -344,29 +360,11 @@ class _Fp8GemmSM90:
             cute.group_modes(gB_nk, 0, 2),
         )
 
-        warp_group_idx = cute.arch.make_warp_uniform(
-            tidx // self.num_threads_per_warp_group
-        )
-        mma_warp_group_thread_layout = cute.make_layout(
-            self.num_mma_warp_groups, stride=self.num_threads_per_warp_group
-        )
-        thr_mma = tiled_mma.get_slice(
-            mma_warp_group_thread_layout(warp_group_idx - self.num_dma_warp_groups)
-        )
-
-        tCsA = thr_mma.partition_A(sA)
-        tCsB = thr_mma.partition_B(sB)
-        tCrA = tiled_mma.make_fragment_A(tCsA)
-        tCrB = tiled_mma.make_fragment_B(tCsB)
-
-        tCgD = thr_mma.partition_C(gD_mn)
-        acc_shape = tCgD.shape[:3]
-        accumulators = cute.make_rmem_tensor(acc_shape, self.acc_dtype)
-
         k_tile_cnt = cute.size(gA_mk, mode=[2])  # type: ignore
         pipeline_init_wait(cluster_shape_mn=self.cluster_shape_mn)
 
-        is_dma_warp_group = warp_group_idx < self.num_dma_warp_groups
+        is_dma_warp_group = warp_group_idx == 0
+
         if is_dma_warp_group:
             cute.arch.setmaxregister_decrease(self.load_register_requirement)
 
@@ -415,16 +413,42 @@ class _Fp8GemmSM90:
 
         if not is_dma_warp_group:
             cute.arch.setmaxregister_increase(self.mma_register_requirement)
+
+            consumer_wg_idx = warp_group_idx - self.num_dma_warp_groups
+
+            thr_mma = tiled_mma.get_slice(local_tidx)
+
+            tCsA = thr_mma.partition_A(sA)
+            tCsB = thr_mma.partition_B(sB)
+            tCrA = tiled_mma.make_fragment_A(tCsA)
+            tCrB = tiled_mma.make_fragment_B(tCsB)
+
+            tCgD = thr_mma.partition_C(gD_mn)
+            acc_shape = tCgD.shape[:3]
+            accumulators = cute.make_rmem_tensor(acc_shape, self.acc_dtype)
+
             tile_sched = utils.StaticPersistentTileScheduler.create(
                 tile_sched_params, cute.arch.block_idx(), cute.arch.grid_dim()
             )
             work_tile = tile_sched.initial_work_tile_info()
+
+            if consumer_wg_idx == 1:
+                if work_tile.is_valid_tile:
+                    tile_sched.advance_to_next_work()
+                    work_tile = tile_sched.get_current_work()
+
             mainloop_consumer_read_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Consumer, self.ab_stage
             )
             mainloop_consumer_release_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Consumer, self.ab_stage
             )
+
+            if consumer_wg_idx == 1:
+                for _ in range(k_tile_cnt):
+                    mainloop_consumer_read_state.advance()
+                    mainloop_consumer_release_state.advance()
+
             num_k_blocks = cute.size(tCrA, mode=[2])  # type: ignore
 
             copy_atom_r2s = sm90_utils.sm90_get_smem_store_op(
@@ -438,9 +462,7 @@ class _Fp8GemmSM90:
             )
             tiled_copy_C_Atom = cute.make_tiled_copy_C_atom(copy_atom_C, tiled_mma)
             tiled_copy_r2s = cute.make_tiled_copy_S(copy_atom_r2s, tiled_copy_C_Atom)
-            thr_copy_r2s = tiled_copy_r2s.get_slice(
-                tidx - self.num_dma_warp_groups * self.num_threads_per_warp_group
-            )
+            thr_copy_r2s = tiled_copy_r2s.get_slice(local_tidx)
             tRS_sD = thr_copy_r2s.partition_D(sD)
             tRS_rAcc = tiled_copy_r2s.retile(accumulators)
             rD_shape = cute.shape(thr_copy_r2s.partition_S(sD))
@@ -454,7 +476,7 @@ class _Fp8GemmSM90:
 
             tma_store_producer_group = pipeline.CooperativeGroup(
                 pipeline.Agent.Thread,
-                self.num_mma_threads,
+                self.num_threads_per_warp_group,
             )
             tma_store_pipeline = pipeline.PipelineTmaStore.create(
                 num_stages=self.epi_stage,  # type: ignore
@@ -472,6 +494,8 @@ class _Fp8GemmSM90:
                 accumulators.fill(0.0)
                 tiled_mma.set(cute.nvgpu.warpgroup.Field.ACCUMULATE, False)
                 cute.nvgpu.warpgroup.fence()
+
+                self.mma_barriers[consumer_wg_idx].arrive_and_wait()
 
                 for k_tile in range(prologue_mma_cnt):
                     mainloop_pipeline.consumer_wait(mainloop_consumer_read_state)
@@ -522,6 +546,8 @@ class _Fp8GemmSM90:
                     mainloop_pipeline.consumer_release(mainloop_consumer_release_state)
                     mainloop_consumer_release_state.advance()
 
+                self.mma_barriers[1 - consumer_wg_idx].arrive()
+
                 for i in range(cute.size(accumulators)):  # type: ignore
                     accumulators[i] = accumulators[i] * scale_val
 
@@ -555,9 +581,13 @@ class _Fp8GemmSM90:
                         tRS_sD[(None, None, None, epi_buffer)],
                     )
                     cute.arch.fence_proxy("async.shared", space="cta")
-                    self.epilog_sync_barrier.arrive_and_wait()
+                    self.epi_barriers[consumer_wg_idx].arrive_and_wait()
                     gmem_coord = epi_tile_layout.get_hier_coord(epi_idx)
-                    if warp_idx == self.epi_store_warp_id:
+                    epi_store_warp = (
+                        self.epi_store_warp_id
+                        + consumer_wg_idx * self.num_warps_per_warp_group
+                    )
+                    if warp_idx == epi_store_warp:
                         cute.copy(
                             tma_atom_d,
                             bSG_sD[(None, epi_buffer)],
@@ -565,9 +595,13 @@ class _Fp8GemmSM90:
                         )
                         tma_store_pipeline.producer_commit()
                         tma_store_pipeline.producer_acquire()
-                    self.epilog_sync_barrier.arrive_and_wait()
+                    self.epi_barriers[consumer_wg_idx].arrive_and_wait()
+
+                self.epi_barriers[1 - consumer_wg_idx].arrive()
 
                 tile_sched.advance_to_next_work()
+                if work_tile.is_valid_tile:
+                    tile_sched.advance_to_next_work()
                 work_tile = tile_sched.get_current_work()
 
             tma_store_pipeline.producer_tail()
@@ -703,7 +737,6 @@ class _Fp8GemmSM90:
 def _pick_tile(M: int, N: int) -> tuple[int, int]:
     ratio = M / N
     if ratio >= 4:
-        # tall-skinny: smaller N tile keeps CTA count high along N
         if N % 128 == 0 and M % 128 == 0:
             return (128, 128)
         if N % 64 == 0 and M % 128 == 0:
