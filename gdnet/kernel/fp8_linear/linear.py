@@ -23,13 +23,14 @@ class FP8Linear(nn.Module):
         x_flat = x.reshape(-1, shape[-1])
 
         if self._step % self.scale_update_freq == 0:  # type: ignore
-            amax = torch.stack(
-                [x_flat.float().abs().max(), self.weight.float().abs().max()]
-            )
-            if dist.is_initialized():
-                dist.all_reduce(amax, op=dist.ReduceOp.MAX)
-            self.scale_x.fill_(FP8_MAX / amax[0].clamp(min=1e-12))  # type: ignore
-            self.scale_w.fill_(FP8_MAX / amax[1].clamp(min=1e-12))  # type: ignore
+            with torch.no_grad():
+                amax = torch.stack(
+                    [x_flat.float().abs().max(), self.weight.float().abs().max()]
+                )
+                if dist.is_initialized():
+                    dist.all_reduce(amax, op=dist.ReduceOp.MAX)
+                self.scale_x.fill_(FP8_MAX / amax[0].clamp(min=1e-12))  # type: ignore
+                self.scale_w.fill_(FP8_MAX / amax[1].clamp(min=1e-12))  # type: ignore
 
         self._step.add_(1)  # type: ignore
         x_fp8, _, _ = quantize_fp8(x_flat, scale=self.scale_x.item(), need_col=False)  # type: ignore
