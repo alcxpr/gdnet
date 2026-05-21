@@ -21,6 +21,7 @@ def _quantize_fp8_kernel(
     stride_xcK,
     BLOCK_M: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    NEED_COL: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_k = tl.program_id(1)
@@ -46,16 +47,18 @@ def _quantize_fp8_kernel(
         mask=mask,
     )
 
-    tl.store(
-        xc_ptr + offs_k[:, None] * stride_xcK + offs_m[None, :],
-        tl.trans(x_fp8),
-        mask=tl.trans(mask),
-    )
+    if NEED_COL:
+        tl.store(
+            xc_ptr + offs_k[:, None] * stride_xcK + offs_m[None, :],
+            tl.trans(x_fp8),
+            mask=tl.trans(mask),
+        )
 
 
 def quantize_fp8(
     x: torch.Tensor,
     scale: float = 1.0,
+    need_col: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if torch.cuda.get_device_capability(x.device) < (9, 0):
         raise RuntimeError("quantize_fp8 requires SM90+ (fp8e4nv compute)")
@@ -67,7 +70,7 @@ def quantize_fp8(
     M, K = x.shape
 
     x_row = torch.empty(M, K, dtype=torch.float8_e4m3fn, device=x.device)  # type: ignore
-    x_col = torch.empty(K, M, dtype=torch.float8_e4m3fn, device=x.device)  # type: ignore
+    x_col = torch.empty(K, M, dtype=torch.float8_e4m3fn, device=x.device) if need_col else x_row  # type: ignore
     amax = torch.zeros(1, dtype=torch.float32, device=x.device)  # type: ignore
 
     BLOCK_M, BLOCK_K = 64, 64
@@ -86,6 +89,7 @@ def quantize_fp8(
         M,
         BLOCK_M=BLOCK_M,  # type: ignore
         BLOCK_K=BLOCK_K,  # type: ignore
+        NEED_COL=need_col,  # type: ignore
     )
 
     return x_row.reshape(shape), x_col, amax.squeeze()

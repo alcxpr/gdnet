@@ -1,3 +1,7 @@
+"""
+Unused for now since it's not optimized when M is large.
+"""
+
 from __future__ import annotations
 
 import cuda.bindings.driver as cuda
