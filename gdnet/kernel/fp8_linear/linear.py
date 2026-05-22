@@ -15,48 +15,55 @@ class _Fp8LinearFn(torch.autograd.Function):
         w: torch.Tensor,
         scale_x: torch.Tensor,
         scale_w: torch.Tensor,
+        inv_scale_x: torch.Tensor,
+        inv_scale_w: torch.Tensor,
+        w_fp8_row: torch.Tensor,
+        w_fp8_col: torch.Tensor,
+        amax_w: torch.Tensor,
     ) -> torch.Tensor:
         x_fp8, x_fp8_col, _ = quantize_fp8(x, scale=scale_x, need_col=True)
-        w_fp8, w_fp8_col, _ = quantize_fp8(w, scale=scale_w, need_col=True)
-        ctx.save_for_backward(x_fp8_col, w_fp8_col, scale_x, scale_w)
+        quantize_fp8(w, scale=scale_w, need_col=True, out_row=w_fp8_row, out_col=w_fp8_col, amax_buf=amax_w)
+        ctx.save_for_backward(x_fp8_col, w_fp8_col, scale_x, scale_w, inv_scale_x, inv_scale_w)
         return torch._scaled_mm(  # type: ignore
             x_fp8,
-            w_fp8.T,
-            scale_a=scale_x.reciprocal(),
-            scale_b=scale_w.reciprocal(),
+            w_fp8_row.T,
+            scale_a=inv_scale_x,
+            scale_b=inv_scale_w,
             out_dtype=torch.bfloat16,  # type: ignore
         )
 
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):  # type: ignore
-        x_fp8_col, w_fp8_col, scale_x, scale_w = ctx.saved_tensors
+        x_fp8_col, w_fp8_col, scale_x, scale_w, inv_scale_x, inv_scale_w = ctx.saved_tensors
 
         grad_out = grad_out.contiguous().bfloat16()
         with torch.no_grad():
-            amax_go = grad_out.float().abs().amax()
+            amax_go = grad_out.abs().amax().float()
             scale_go = (FP8_MAX / amax_go.clamp(min=1e-12)).unsqueeze(0)
+            inv_scale_go = scale_go.reciprocal()
 
         go_fp8, go_fp8_col, _ = quantize_fp8(grad_out, scale=scale_go, need_col=True)
         dgrad = torch._scaled_mm(  # type: ignore
             w_fp8_col,
             go_fp8.T,
-            scale_a=scale_w.reciprocal(),
-            scale_b=scale_go.reciprocal(),
+            scale_a=inv_scale_w,
+            scale_b=inv_scale_go,
             out_dtype=torch.bfloat16,  # type: ignore
         ).T.contiguous()
         wgrad = torch._scaled_mm(  # type: ignore
             go_fp8_col,
             x_fp8_col.T,
-            scale_a=scale_go.reciprocal(),
-            scale_b=scale_x.reciprocal(),
+            scale_a=inv_scale_go,
+            scale_b=inv_scale_x,
             out_dtype=torch.bfloat16,  # type: ignore
         )
-        return dgrad, wgrad, None, None
+        return dgrad, wgrad, None, None, None, None, None, None, None
 
 
 class FP8Linear(nn.Module):
     def __init__(self, linear: nn.Linear, scale_update_freq: int = 16):
         super().__init__()
+        out_f, in_f = linear.weight.shape
         self.weight = nn.Parameter(linear.weight.data.bfloat16())
         self.register_parameter(
             "bias",
@@ -66,7 +73,24 @@ class FP8Linear(nn.Module):
         dev = linear.weight.device
         self.register_buffer("scale_x", torch.ones(1, device=dev))  # type: ignore
         self.register_buffer("scale_w", torch.ones(1, device=dev))  # type: ignore
+        self.register_buffer("inv_scale_x", torch.ones(1, device=dev))  # type: ignore
+        self.register_buffer("inv_scale_w", torch.ones(1, device=dev))  # type: ignore
+        self.register_buffer("_w_fp8_row", torch.empty(out_f, in_f, dtype=torch.float8_e4m3fn, device=dev))  # type: ignore
+        self.register_buffer("_w_fp8_col", torch.empty(in_f, out_f, dtype=torch.float8_e4m3fn, device=dev))  # type: ignore
+        self.register_buffer("_amax_w", torch.zeros(1, dtype=torch.float32, device=dev))  # type: ignore
         self._step: int = 0
+
+    def _update_scales(self, x_flat: torch.Tensor) -> None:
+        amax = torch.stack(
+            [x_flat.abs().max().float(), self.weight.abs().max().float()]
+        )
+        if dist.is_initialized():
+            dist.all_reduce(amax, op=dist.ReduceOp.MAX)
+        amax.clamp_(min=1e-12)
+        torch.div(FP8_MAX, amax[0:1], out=self.scale_x)
+        torch.div(FP8_MAX, amax[1:2], out=self.scale_w)
+        torch.reciprocal(self.scale_x, out=self.inv_scale_x)
+        torch.reciprocal(self.scale_w, out=self.inv_scale_w)
 
     @torch.compiler.disable
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -75,13 +99,7 @@ class FP8Linear(nn.Module):
 
         if self._step % self.scale_update_freq == 0:
             with torch.no_grad():
-                amax = torch.stack(
-                    [x_flat.float().abs().max(), self.weight.float().abs().max()]
-                )
-                if dist.is_initialized():
-                    dist.all_reduce(amax, op=dist.ReduceOp.MAX)
-                self.scale_x.fill_(FP8_MAX / amax[0].clamp(min=1e-12))  # type: ignore
-                self.scale_w.fill_(FP8_MAX / amax[1].clamp(min=1e-12))  # type: ignore
+                self._update_scales(x_flat)
 
         self._step += 1
 
@@ -90,6 +108,11 @@ class FP8Linear(nn.Module):
             self.weight,
             self.scale_x,
             self.scale_w,
+            self.inv_scale_x,
+            self.inv_scale_w,
+            self._w_fp8_row,
+            self._w_fp8_col,
+            self._amax_w,
         )
         if self.bias is not None:
             out = out + self.bias

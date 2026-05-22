@@ -60,6 +60,9 @@ def quantize_fp8(
     x: torch.Tensor,
     scale: torch.Tensor,
     need_col: bool = True,
+    out_row: torch.Tensor | None = None,
+    out_col: torch.Tensor | None = None,
+    amax_buf: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if torch.cuda.get_device_capability(x.device) < (9, 0):
         raise RuntimeError("quantize_fp8 requires SM90+ (fp8e4nv compute)")
@@ -70,13 +73,24 @@ def quantize_fp8(
         x = x.contiguous()
     M, K = x.shape
 
-    x_row = torch.empty(M, K, dtype=torch.float8_e4m3fn, device=x.device)  # type: ignore
-    x_col = (
-        torch.empty(K, M, dtype=torch.float8_e4m3fn, device=x.device)  # type: ignore
-        if need_col
-        else x_row
-    )
-    amax = torch.zeros(1, dtype=torch.float32, device=x.device)  # type: ignore
+    if out_row is None:
+        x_row = torch.empty(M, K, dtype=torch.float8_e4m3fn, device=x.device)  # type: ignore
+    else:
+        x_row = out_row[:M, :K] if out_row.shape != (M, K) else out_row
+
+    if need_col:
+        if out_col is None:
+            x_col = torch.empty(K, M, dtype=torch.float8_e4m3fn, device=x.device)  # type: ignore
+        else:
+            x_col = out_col[:K, :M] if out_col.shape != (K, M) else out_col
+    else:
+        x_col = x_row
+
+    if amax_buf is None:
+        amax = torch.zeros(1, dtype=torch.float32, device=x.device)  # type: ignore
+    else:
+        amax_buf.zero_()
+        amax = amax_buf
 
     BLOCK_M, BLOCK_K = 64, 64
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(K, BLOCK_K))
@@ -91,7 +105,7 @@ def quantize_fp8(
         K,
         x.stride(0),
         x_row.stride(0),
-        M,
+        x_col.stride(0),
         BLOCK_M=BLOCK_M,  # type: ignore
         BLOCK_K=BLOCK_K,  # type: ignore
         NEED_COL=need_col,  # type: ignore

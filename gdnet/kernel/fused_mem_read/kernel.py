@@ -17,7 +17,7 @@ def _fused_mem_read_fwd_kernel(
     E_ptr,
     BTAGS_ptr,
     BVALS_ptr,
-    alpha,
+    alpha_ptr,
     W_ptr,
     OUT_ptr,
     B,
@@ -31,6 +31,7 @@ def _fused_mem_read_fwd_kernel(
     b = tl.program_id(0)
     s_rows = tl.arange(0, BLOCK_S)
     s_mask = s_rows < n_slots
+    alpha = tl.load(alpha_ptr).to(tl.float32)
 
     # NOTE: No d_mask on the d_sig or d_c loops. d_sig and d_c are asserted to be
     # multiples of BLOCK_DSIG/BLOCK_DC in the launcher (both must be powers of 2).
@@ -88,7 +89,7 @@ def _fused_mem_read_bwd_kernel(
     BTAGS_ptr,
     BVALS_ptr,
     W_ptr,
-    alpha,
+    alpha_ptr,
     DQ_ptr,
     DGAMMA_ptr,
     DALPHA_ptr,
@@ -106,6 +107,7 @@ def _fused_mem_read_bwd_kernel(
     b = tl.program_id(0)
     s_rows = tl.arange(0, BLOCK_S)
     s_mask = s_rows < n_slots
+    alpha = tl.load(alpha_ptr).to(tl.float32)
 
     w = tl.load(W_ptr + b * n_slots + s_rows, mask=s_mask, other=0.0).to(tl.float32)
 
@@ -195,7 +197,7 @@ def fused_mem_read_fwd(
     e: torch.Tensor,
     buffer_tags: torch.Tensor,
     buffer_vals: torch.Tensor,
-    alpha: float,
+    alpha: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
@@ -204,7 +206,7 @@ def fused_mem_read_fwd(
         e: Slot embeddings `(n_slots, d_sig)` contiguous.
         buffer_tags: Stored content tags `(B, n_slots, d_sig)` contiguous.
         buffer_vals: Stored compressed values `(B, n_slots, d_c)` contiguous, d_c must be a power of 2.
-        alpha: Scalar weight for the position term.
+        alpha: Scalar weight tensor for the position term; loaded on-device (no host sync).
 
     Returns:
         retrieved_c `(B, d_c)` in q.dtype and w `(B, n_slots)` float32.
@@ -246,7 +248,7 @@ def fused_mem_read_bwd(
     buffer_tags: torch.Tensor,
     buffer_vals: torch.Tensor,
     w: torch.Tensor,
-    alpha: float,
+    alpha: torch.Tensor,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
