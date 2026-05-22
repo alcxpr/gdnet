@@ -11,6 +11,7 @@ from ..kernel.gated_causal_depthwise_conv.conv import (
 
 _SYMM_HANDLES: dict = {}
 _COPY_STREAMS: dict[int, torch.cuda.Stream] = {}
+_PENDING_BWD_HALOS: list = []
 
 
 def _copy_stream() -> torch.cuda.Stream:
@@ -27,6 +28,13 @@ def clear_symm_handles() -> None:
     the batch size or model changes and the old handles should be freed.
     """
     _SYMM_HANDLES.clear()
+
+
+def flush_bwd_halos() -> None:
+    for dX_slice, hdl, B, km1, d, rank in _PENDING_BWD_HALOS:
+        hdl.bwd_hdl.wait_signal(rank + 1)
+        dX_slice.add_(hdl._bwd[: B * km1 * d].view(B, km1, d))
+    _PENDING_BWD_HALOS.clear()
 
 
 class _SymmHaloHandle:
@@ -141,7 +149,6 @@ class FusedHaloConvSP(torch.autograd.Function):
                 hdl.bwd_hdl.put_signal(rank - 1)
 
         if rank < world_size - 1:
-            hdl.bwd_hdl.wait_signal(rank + 1)
-            dX[:, -km1:, :].add_(hdl._bwd[: B * km1 * d].view(B, km1, d))
+            _PENDING_BWD_HALOS.append((dX[:, -km1:, :], hdl, B, km1, d, rank))
 
         return dX, dW_conv, None, None, None, None

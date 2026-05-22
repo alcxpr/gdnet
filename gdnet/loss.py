@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from .utils.fp8 import Precision
 from .utils.fp8 import autocast as make_autocast
+from .utils.sp import flush_bwd_halos
 
 
 def sn_soft_penalty(layers: list, scale: float = 0.1) -> torch.Tensor:
@@ -169,6 +170,8 @@ def projected_step(
                 scaler.scale(loss_task).backward(retain_graph=True)
             else:
                 loss_task.backward(retain_graph=True)
+        if sp_group is not None:
+            flush_bwd_halos()
 
         for acc, p in zip(g_task, params):
             if p.grad is not None:
@@ -198,6 +201,8 @@ def projected_step(
                 scaler.scale(loss_info).backward(retain_graph=need_trans)
             else:
                 loss_info.backward(retain_graph=need_trans)
+        if sp_group is not None:
+            flush_bwd_halos()
 
         if need_trans:
             with make_autocast(precision):  # type: ignore
@@ -210,6 +215,8 @@ def projected_step(
                     scaler.scale(loss_trans).backward()
                 else:
                     loss_trans.backward()
+            if sp_group is not None:
+                flush_bwd_halos()
 
         for acc, p in zip(g_info, params):
             if p.grad is not None:
