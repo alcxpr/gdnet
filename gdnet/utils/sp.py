@@ -91,17 +91,13 @@ class FusedHaloConvSP(torch.autograd.Function):
 
         if rank < world_size - 1:
             edge = x[:, -km1:, :].contiguous()
-            cs = _copy_stream()
-            edge_ready = torch.cuda.Event()
-            edge_sent = torch.cuda.Event()
-            edge_ready.record()
-            cs.wait_event(edge_ready)
-            with torch.cuda.stream(cs):
-                peer_fwd = hdl.fwd_hdl.get_buffer(rank + 1, (B, km1, d), x.dtype)
-                peer_fwd.copy_(edge)
+            peer_fwd = hdl.fwd_hdl.get_buffer(rank + 1, (B, km1, d), x.dtype)
+            peer_fwd.copy_(edge)
+            data_ready = torch.cuda.Event()
+            data_ready.record()
+            with torch.cuda.stream(_copy_stream()):
+                _copy_stream().wait_event(data_ready)
                 hdl.fwd_hdl.put_signal(rank + 1)
-                edge_sent.record()
-            torch.cuda.current_stream().wait_event(edge_sent)
 
         if rank > 0:
             hdl.fwd_hdl.wait_signal(rank - 1)
@@ -130,17 +126,13 @@ class FusedHaloConvSP(torch.autograd.Function):
         )
 
         if rank > 0:
-            cs = _copy_stream()
-            kernel_done = torch.cuda.Event()
-            bwd_sent = torch.cuda.Event()
-            kernel_done.record()
-            cs.wait_event(kernel_done)
-            with torch.cuda.stream(cs):
-                peer_bwd = hdl.bwd_hdl.get_buffer(rank - 1, (B, km1, d), x.dtype)
-                peer_bwd.copy_(dHalo)
+            peer_bwd = hdl.bwd_hdl.get_buffer(rank - 1, (B, km1, d), x.dtype)
+            peer_bwd.copy_(dHalo)
+            data_ready = torch.cuda.Event()
+            data_ready.record()
+            with torch.cuda.stream(_copy_stream()):
+                _copy_stream().wait_event(data_ready)
                 hdl.bwd_hdl.put_signal(rank - 1)
-                bwd_sent.record()
-            torch.cuda.current_stream().wait_event(bwd_sent)
 
         if rank < world_size - 1:
             hdl.bwd_hdl.wait_signal(rank + 1)
