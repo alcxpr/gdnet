@@ -68,14 +68,13 @@ class FusedHaloConvSP(torch.autograd.Function):
         k: int,
         BLOCK_T: int,
         sp_group: dist.ProcessGroup,
-        layer_id: int,
     ) -> torch.Tensor:
         rank = dist.get_rank(sp_group)
         world_size = dist.get_world_size(sp_group)
         B, _, d = x.shape
         km1 = k - 1
 
-        hdl = _get_symm_handle(layer_id, B, km1, d, x.dtype, sp_group)
+        hdl = _get_symm_handle(W_conv.data_ptr(), B, km1, d, x.dtype, sp_group)
 
         if rank < world_size - 1:
             edge = x[:, -km1:, :].contiguous()
@@ -127,4 +126,4 @@ class FusedHaloConvSP(torch.autograd.Function):
             hdl.bwd_hdl.wait_signal(rank + 1)
             dX[:, -(k - 1) :, :].add_(hdl._bwd.view(B, k - 1, d))
 
-        return dX, dW_conv, None, None, None, None, None
+        return dX, dW_conv, None, None, None, None

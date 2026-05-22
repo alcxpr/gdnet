@@ -118,7 +118,7 @@ class GDLayer(nn.Module):
         k = conv_module.size
         BLOCK_T = min(triton.next_power_of_2(T), 64)
         W_conv = conv_module.conv.weight.squeeze(1)
-        conv_3d = FusedHaloConvSP.apply(fwd, W_conv, T, k, BLOCK_T, sp_group, id(conv_module))
+        conv_3d = FusedHaloConvSP.apply(fwd, W_conv, T, k, BLOCK_T, sp_group)
         return conv_3d, conv_3d.view(B * T, d)
 
     def fwd_step(
