@@ -52,6 +52,8 @@ CONFIGS = [
     (4, 512),
     (8, 512),
     (16, 512),
+    (32, 512),
+    (64, 512),
     (4, 1024),
     (8, 1024),
     (16, 1024),
@@ -232,7 +234,13 @@ def run_config(
         convert_to_fp8(model)
 
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], static_graph=True, bucket_cap_mb=200, broadcast_buffers=False)  # type: ignore
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            static_graph=True,
+            bucket_cap_mb=200,
+            broadcast_buffers=False,
+        )  # type: ignore
 
     if compile_model:
         torch._functorch.config.donated_buffer = False
