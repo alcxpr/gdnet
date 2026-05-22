@@ -76,14 +76,13 @@ class GatedCausalDepthwiseConvFunction(torch.autograd.Function):
         )
         dH = rmsnorm_bwd(d_h_norm, H, RSTD, W_norm, BLOCK_D)
 
-        conv_req = conv_flat.detach().requires_grad_(True)
-        W1_req = W1.detach().requires_grad_(True)
-        b1_req = b1.detach().requires_grad_(True)
-        with torch.enable_grad():
-            F.silu(F.linear(conv_req, W1_req, b1_req)).backward(dH)
-        d_conv_total = d_conv + conv_req.grad  # type: ignore
-        dW1 = W1_req.grad
-        db1 = b1_req.grad
+        h_pre = F.linear(conv_flat, W1, b1)
+        sig_h = F.sigmoid(h_pre)  # type: ignore
+        d_h_pre = dH * sig_h * (1.0 + h_pre * (1.0 - sig_h))
+        d_conv_from_silu = d_h_pre @ W1
+        dW1 = d_h_pre.t() @ conv_flat
+        db1 = d_h_pre.sum(0)
+        d_conv_total = d_conv + d_conv_from_silu
 
         return d_conv_total, d_side, d_R, dW1, db1, dW_norm, dW2, db2, None
 
@@ -167,9 +166,8 @@ def gated_causal_depthwise_conv(
     assert d == triton.next_power_of_2(d), f"d={d} must be a power of 2"
 
     BLOCK_T = min(triton.next_power_of_2(T), 64)
-    x_dt = x.permute(0, 2, 1).contiguous()
-    conv_out_dt = CausalDWConvFunction.apply(x_dt, W_conv, T, k, BLOCK_T)
-    conv_flat = conv_out_dt.permute(0, 2, 1).contiguous().view(B * T, d)  # type: ignore
+    conv_out = CausalDWConvFunction.apply(x, W_conv, T, k, BLOCK_T)
+    conv_flat = conv_out.view(B * T, d)  # type: ignore
 
     fwd_out, side_out = gated_output(conv_flat, side, R, W1, b1, W_norm, W2, b2, eps)
     return fwd_out.view(B, T, d).to(x.dtype), side_out.view(B, T, d).to(x.dtype)

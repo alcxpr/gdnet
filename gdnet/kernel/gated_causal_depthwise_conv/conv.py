@@ -142,7 +142,7 @@ def _causal_dwconv_bwd_kernel(
             ).to(tl.float32)
             x_vals = halo_x + local_x
         else:
-            valid = t_mask[None, :] & (t_src >= 0) & (ki_range < k)[:, None]
+            valid = t_mask[None, :] & (t_src >= 0) & (t_src < T) & (ki_range < k)[:, None]
             x_vals = tl.load(
                 X_ptr + b * stride_b + t_src * stride_t + ch * stride_d,
                 mask=valid,
@@ -180,30 +180,31 @@ def _causal_dwconv_bwd_kernel(
 
 
 def causal_dwconv_fwd(
-    x_dt: torch.Tensor,
+    x: torch.Tensor,
     W_conv: torch.Tensor,
     T: int,
     k: int,
     BLOCK_T: int,
 ) -> torch.Tensor:
-    B, d, _ = x_dt.shape
-    out = torch.empty(B, d, T, dtype=x_dt.dtype, device=x_dt.device)  # type: ignore
+    """x: (B, T, d); returns (B, T, d)."""
+    B, _, d = x.shape
+    out = torch.empty(B, T, d, dtype=x.dtype, device=x.device)  # type: ignore
     _causal_dwconv_fwd_kernel[(B, d)](
-        x_dt,
-        x_dt,  # dummy, never read when USE_HALO=False
+        x,
+        x,  # dummy HALO_ptr, never read when USE_HALO=False
         W_conv,
         out,
         T,
         k,
-        x_dt.stride(0),
-        x_dt.stride(2),
-        x_dt.stride(1),
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
         0,
         0,
         0,  # dummy halo strides
         out.stride(0),
-        out.stride(2),
         out.stride(1),
+        out.stride(2),
         BLOCK_T=BLOCK_T,  # type: ignore
         MAX_K=MAX_K,  # type: ignore
         USE_HALO=False,  # type: ignore
@@ -212,44 +213,32 @@ def causal_dwconv_fwd(
 
 
 def causal_dwconv_fwd_sp(
-    x_dt: torch.Tensor,
-    halo_dt: torch.Tensor,
+    x: torch.Tensor,
+    halo: torch.Tensor,
     W_conv: torch.Tensor,
     T: int,
     k: int,
     BLOCK_T: int,
 ) -> torch.Tensor:
-    """SP variant: halo_dt is (B, d, k-1) from the left neighbour rank.
-
-    Args:
-        x_dt: Local input in channel-first layout (B, d, T_local).
-        halo_dt: Left context received via SPHaloExchange (B, d, k-1).
-        W_conv: Depthwise conv weights (d, k).
-        T: Local sequence length.
-        k: Kernel size.
-        BLOCK_T: Triton tile size along T.
-
-    Returns:
-        Conv output (B, d, T).
-    """
-    B, d, _ = x_dt.shape
-    out = torch.empty(B, d, T, dtype=x_dt.dtype, device=x_dt.device)  # type: ignore
+    """x: (B, T, d); halo: (B, k-1, d) from left neighbour; returns (B, T, d)."""
+    B, _, d = x.shape
+    out = torch.empty(B, T, d, dtype=x.dtype, device=x.device)  # type: ignore
     _causal_dwconv_fwd_kernel[(B, d)](
-        x_dt,
-        halo_dt,
+        x,
+        halo,
         W_conv,
         out,
         T,
         k,
-        x_dt.stride(0),
-        x_dt.stride(2),
-        x_dt.stride(1),
-        halo_dt.stride(0),
-        halo_dt.stride(2),
-        halo_dt.stride(1),
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        halo.stride(0),
+        halo.stride(1),
+        halo.stride(2),
         out.stride(0),
-        out.stride(2),
         out.stride(1),
+        out.stride(2),
         BLOCK_T=BLOCK_T,  # type: ignore
         MAX_K=MAX_K,  # type: ignore
         USE_HALO=True,  # type: ignore
@@ -258,29 +247,30 @@ def causal_dwconv_fwd_sp(
 
 
 def causal_dwconv_bwd(
-    d_conv_dt: torch.Tensor,
-    x_dt: torch.Tensor,
+    d_conv: torch.Tensor,
+    x: torch.Tensor,
     W_conv: torch.Tensor,
     T: int,
     k: int,
     BLOCK_T: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    B, d, _ = x_dt.shape
-    dX_dt = torch.zeros(B, d, T, dtype=torch.float32, device=x_dt.device)  # type: ignore
+    """d_conv, x: (B, T, d); returns dX (B, T, d) float32, dW_conv."""
+    B, _, d = x.shape
+    dX = torch.zeros(B, T, d, dtype=torch.float32, device=x.device)  # type: ignore
     dW_conv = torch.zeros_like(W_conv)  # type: ignore
     _causal_dwconv_bwd_kernel[(B, d)](
-        d_conv_dt,
-        x_dt,
-        x_dt,  # dummy HALO_ptr
+        d_conv,
+        x,
+        x,  # dummy HALO_ptr
         W_conv,
-        dX_dt,
-        dX_dt,  # dummy dHALO_ptr, never written when USE_HALO=False
+        dX,
+        dX,  # dummy dHALO_ptr, never written when USE_HALO=False
         dW_conv,
         T,
         k,
-        d_conv_dt.stride(0),
-        d_conv_dt.stride(2),
-        d_conv_dt.stride(1),
+        d_conv.stride(0),
+        d_conv.stride(1),
+        d_conv.stride(2),
         0,
         0,
         0,  # dummy halo strides
@@ -288,26 +278,63 @@ def causal_dwconv_bwd(
         MAX_K=MAX_K,  # type: ignore
         USE_HALO=False,  # type: ignore
     )
-    return dX_dt, dW_conv
+    return dX, dW_conv
+
+
+def causal_dwconv_bwd_sp(
+    d_conv: torch.Tensor,
+    x: torch.Tensor,
+    halo: torch.Tensor,
+    W_conv: torch.Tensor,
+    T: int,
+    k: int,
+    BLOCK_T: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """d_conv, x: (B, T, d); halo: (B, k-1, d); returns dX (B, T, d), dHalo (B, k-1, d), dW_conv."""
+    B, _, d = x.shape
+    dX = torch.zeros(B, T, d, dtype=torch.float32, device=x.device)  # type: ignore
+    dHalo = torch.zeros(B, k - 1, d, dtype=torch.float32, device=x.device)  # type: ignore
+    dW_conv = torch.zeros_like(W_conv)  # type: ignore
+    _causal_dwconv_bwd_kernel[(B, d)](
+        d_conv,
+        x,
+        halo,
+        W_conv,
+        dX,
+        dHalo,
+        dW_conv,
+        T,
+        k,
+        d_conv.stride(0),
+        d_conv.stride(1),
+        d_conv.stride(2),
+        halo.stride(0),
+        halo.stride(1),
+        halo.stride(2),
+        BLOCK_T=BLOCK_T,  # type: ignore
+        MAX_K=MAX_K,  # type: ignore
+        USE_HALO=True,  # type: ignore
+    )
+    return dX, dHalo, dW_conv
 
 
 class CausalDWConvFunction(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx, x_dt: torch.Tensor, W_conv: torch.Tensor, T: int, k: int, BLOCK_T: int
+        ctx, x: torch.Tensor, W_conv: torch.Tensor, T: int, k: int, BLOCK_T: int
     ) -> torch.Tensor:
-        out = causal_dwconv_fwd(x_dt, W_conv, T, k, BLOCK_T)
-        ctx.save_for_backward(x_dt, W_conv)
+        out = causal_dwconv_fwd(x, W_conv, T, k, BLOCK_T)
+        ctx.save_for_backward(x, W_conv)
         ctx.T, ctx.k, ctx.BLOCK_T = T, k, BLOCK_T
         return out
 
     @staticmethod
-    def backward(ctx, d_conv_dt: torch.Tensor) -> tuple:  # type: ignore
-        x_dt, W_conv = ctx.saved_tensors
-        dX_dt, dW_conv = causal_dwconv_bwd(
-            d_conv_dt.contiguous(), x_dt, W_conv, ctx.T, ctx.k, ctx.BLOCK_T
+    def backward(ctx, d_conv: torch.Tensor) -> tuple:  # type: ignore
+        x, W_conv = ctx.saved_tensors
+        dX, dW_conv = causal_dwconv_bwd(
+            d_conv.contiguous(), x, W_conv, ctx.T, ctx.k, ctx.BLOCK_T
         )
-        return dX_dt, dW_conv, None, None, None
+        return dX, dW_conv, None, None, None
 
 
 class CausalDWConvFunctionSP(torch.autograd.Function):
@@ -316,73 +343,22 @@ class CausalDWConvFunctionSP(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        x_dt: torch.Tensor,
-        halo_dt: torch.Tensor,
+        x: torch.Tensor,
+        halo: torch.Tensor,
         W_conv: torch.Tensor,
         T: int,
         k: int,
         BLOCK_T: int,
     ) -> torch.Tensor:
-        out = causal_dwconv_fwd_sp(x_dt, halo_dt, W_conv, T, k, BLOCK_T)
-        ctx.save_for_backward(x_dt, halo_dt, W_conv)
+        out = causal_dwconv_fwd_sp(x, halo, W_conv, T, k, BLOCK_T)
+        ctx.save_for_backward(x, halo, W_conv)
         ctx.T, ctx.k, ctx.BLOCK_T = T, k, BLOCK_T
         return out
 
     @staticmethod
-    def backward(ctx, d_conv_dt: torch.Tensor) -> tuple:  # type: ignore
-        x_dt, halo_dt, W_conv = ctx.saved_tensors
-        dX_dt, dHalo_dt, dW_conv = causal_dwconv_bwd_sp(
-            d_conv_dt.contiguous(), x_dt, halo_dt, W_conv, ctx.T, ctx.k, ctx.BLOCK_T
+    def backward(ctx, d_conv: torch.Tensor) -> tuple:  # type: ignore
+        x, halo, W_conv = ctx.saved_tensors
+        dX, dHalo, dW_conv = causal_dwconv_bwd_sp(
+            d_conv.contiguous(), x, halo, W_conv, ctx.T, ctx.k, ctx.BLOCK_T
         )
-        return dX_dt, dHalo_dt, dW_conv, None, None, None
-
-
-def causal_dwconv_bwd_sp(
-    d_conv_dt: torch.Tensor,
-    x_dt: torch.Tensor,
-    halo_dt: torch.Tensor,
-    W_conv: torch.Tensor,
-    T: int,
-    k: int,
-    BLOCK_T: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """SP variant: returns (dX_dt, dHalo_dt, dW_conv).
-
-    Args:
-        d_conv_dt: Upstream gradient (B, d, T).
-        x_dt: Saved forward input (B, d, T).
-        halo_dt: Saved forward halo (B, d, k-1).
-        W_conv: Depthwise conv weights (d, k).
-        T: Local sequence length.
-        k: Kernel size.
-        BLOCK_T: Triton tile size along T.
-
-    Returns:
-        dX_dt (B, d, T), dHalo_dt (B, d, k-1), dW_conv (d, k).
-        dHalo_dt is passed back to SPHaloExchange.backward via autograd.
-    """
-    B, d, _ = x_dt.shape
-    dX_dt = torch.zeros(B, d, T, dtype=torch.float32, device=x_dt.device)  # type: ignore
-    dHalo_dt = torch.zeros(B, d, k - 1, dtype=torch.float32, device=x_dt.device)  # type: ignore
-    dW_conv = torch.zeros_like(W_conv)  # type: ignore
-    _causal_dwconv_bwd_kernel[(B, d)](
-        d_conv_dt,
-        x_dt,
-        halo_dt,
-        W_conv,
-        dX_dt,
-        dHalo_dt,
-        dW_conv,
-        T,
-        k,
-        d_conv_dt.stride(0),
-        d_conv_dt.stride(2),
-        d_conv_dt.stride(1),
-        halo_dt.stride(0),
-        halo_dt.stride(2),
-        halo_dt.stride(1),
-        BLOCK_T=BLOCK_T,  # type: ignore
-        MAX_K=MAX_K,  # type: ignore
-        USE_HALO=True,  # type: ignore
-    )
-    return dX_dt, dHalo_dt, dW_conv
+        return dX, dHalo, dW_conv, None, None, None

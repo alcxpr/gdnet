@@ -104,10 +104,8 @@ class GDLayer(nn.Module):
         B, T, d = fwd.shape
         k = conv_module.size
         BLOCK_T = min(triton.next_power_of_2(T), 64)
-        x_dt = fwd.permute(0, 2, 1).contiguous()
         W_conv = conv_module.conv.weight.squeeze(1)
-        conv_out_dt = CausalDWConvFunction.apply(x_dt, W_conv, T, k, BLOCK_T)
-        conv_3d = conv_out_dt.permute(0, 2, 1).contiguous()  # type: ignore
+        conv_3d = CausalDWConvFunction.apply(fwd, W_conv, T, k, BLOCK_T)
         return conv_3d, conv_3d.view(B * T, d)
 
     def _conv_flat_sp(
@@ -119,9 +117,8 @@ class GDLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """SP variant: fused halo exchange + Triton conv, return (conv_3d, conv_flat).
 
-        pending_recv, if provided, is (x_dt, edge, halo_dt, work) from a prior
-        begin_halo_recv call. x_dt and edge are reused directly; work is waited on
-        before the conv. If None, the recv is issued and waited on here.
+        pending_recv, if provided, is (edge, halo, work) from a prior begin_halo_recv
+        call. work is waited on before the conv. If None, the recv is issued here.
         """
         B, T, d = fwd.shape
         k = conv_module.size
@@ -129,16 +126,14 @@ class GDLayer(nn.Module):
         W_conv = conv_module.conv.weight.squeeze(1)
 
         if pending_recv is not None:
-            x_dt, _edge, halo_dt, work = pending_recv
+            _edge, halo, work = pending_recv
         else:
-            x_dt = fwd.permute(0, 2, 1).contiguous()
-            _edge, halo_dt, work = begin_halo_recv(x_dt, k, sp_group)
+            _edge, halo, work = begin_halo_recv(fwd, k, sp_group)
 
         for req in work:
             req.wait()
 
-        conv_out_dt = FusedHaloConvSP.apply(x_dt, halo_dt, W_conv, T, k, BLOCK_T, sp_group)
-        conv_3d = conv_out_dt.permute(0, 2, 1).contiguous()  # type: ignore
+        conv_3d = FusedHaloConvSP.apply(fwd, halo, W_conv, T, k, BLOCK_T, sp_group)
         return conv_3d, conv_3d.view(B * T, d)
 
     def fwd_step(

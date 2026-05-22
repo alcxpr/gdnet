@@ -59,13 +59,12 @@ def _make(B=2, T=16, d=128, k=4, seed=0):
 @pytest.mark.parametrize("B,T,d,k", [(2, 16, 128, 4), (2, 32, 256, 7)])
 def test_causal_dwconv_fwd(B, T, d, k):
     x, _, _, W_conv, *_ = _make(B, T, d, k)
-    x_dt = x.float().permute(0, 2, 1).contiguous()
     BLOCK_T = min(triton.next_power_of_2(T), 64)
 
-    tri = causal_dwconv_fwd(x_dt, W_conv, T, k, BLOCK_T)  # type: ignore
+    tri = causal_dwconv_fwd(x.float(), W_conv, T, k, BLOCK_T)  # type: ignore
     ref = F.conv1d(
         F.pad(x.float().transpose(1, 2), (k - 1, 0)), W_conv.unsqueeze(1), groups=d
-    )
+    ).transpose(1, 2)
 
     assert torch.allclose(tri, ref, atol=1e-4), (  # type: ignore
         f"max diff {(tri - ref).abs().max():.2e}"
@@ -77,15 +76,15 @@ def test_causal_dwconv_fwd_sp(B, T, d, k):
     # Reference: causal conv over [halo | x], output the last T positions.
     # causal_dwconv_fwd_sp should match this without materialising the cat.
     x, _, _, W_conv, *_ = _make(B, T, d, k)
-    x_dt = x.float().permute(0, 2, 1).contiguous()  # (B, d, T)
-    halo_dt = torch.randn(B, d, k - 1, device=DEVICE)
+    x_f = x.float()
+    halo = torch.randn(B, k - 1, d, device=DEVICE)
     BLOCK_T = min(triton.next_power_of_2(T), 64)
 
-    tri = causal_dwconv_fwd_sp(x_dt, halo_dt, W_conv, T, k, BLOCK_T)  # type: ignore
+    tri = causal_dwconv_fwd_sp(x_f, halo, W_conv, T, k, BLOCK_T)  # type: ignore
 
-    # F.conv1d on [halo | x] with no extra padding gives exactly T outputs.
-    padded = torch.cat([halo_dt, x_dt], dim=2)  # type: ignore (B, d, T+k-1)
-    ref = F.conv1d(padded, W_conv.unsqueeze(1), groups=d)  # (B, d, T)
+    # F.conv1d on [halo | x] in (B, d, T) layout with no extra padding gives T outputs.
+    padded = torch.cat([halo.transpose(1, 2), x_f.transpose(1, 2)], dim=2)  # (B, d, T+k-1)
+    ref = F.conv1d(padded, W_conv.unsqueeze(1), groups=d).transpose(1, 2)  # (B, T, d)
 
     assert torch.allclose(tri, ref, atol=1e-4), (  # type: ignore
         f"max diff {(tri - ref).abs().max():.2e}"
@@ -95,15 +94,17 @@ def test_causal_dwconv_fwd_sp(B, T, d, k):
 @pytest.mark.parametrize("B,T,d,k", [(2, 16, 128, 4), (2, 32, 256, 7)])
 def test_causal_dwconv_bwd(B, T, d, k):
     x, _, _, W_conv, *_ = _make(B, T, d, k)
-    x_dt = x.float().permute(0, 2, 1).contiguous()
+    x_f = x.float()
     BLOCK_T = min(triton.next_power_of_2(T), 64)
 
-    x_ref = x_dt.detach().requires_grad_(True)
-    out_ref = F.conv1d(F.pad(x_ref, (k - 1, 0)), W_conv.unsqueeze(1), groups=d)
+    x_ref = x_f.detach().requires_grad_(True)
+    out_ref = F.conv1d(
+        F.pad(x_ref.transpose(1, 2), (k - 1, 0)), W_conv.unsqueeze(1), groups=d
+    ).transpose(1, 2)
     d_conv = torch.ones_like(out_ref)  # type: ignore
     out_ref.backward(d_conv)
 
-    dX_tri, dW_tri = causal_dwconv_bwd(d_conv.contiguous(), x_dt, W_conv, T, k, BLOCK_T)  # type: ignore
+    dX_tri, dW_tri = causal_dwconv_bwd(d_conv.contiguous(), x_f, W_conv, T, k, BLOCK_T)  # type: ignore
 
     assert torch.allclose(dX_tri, x_ref.grad, atol=1e-4), (  # type: ignore
         f"dX max diff {(dX_tri - x_ref.grad).abs().max():.2e}"  # type: ignore
@@ -115,23 +116,23 @@ def test_causal_dwconv_bwd_sp(B, T, d, k):
     # Gradient correctness: bwd_sp(dX, x, halo) must match slicing the gradient
     # of the padded causal conv w.r.t. x and halo separately.
     x, _, _, W_conv, *_ = _make(B, T, d, k)
-    x_dt = x.float().permute(0, 2, 1).contiguous()
-    halo_dt = torch.randn(B, d, k - 1, device=DEVICE)
+    x_f = x.float()
+    halo = torch.randn(B, k - 1, d, device=DEVICE)
     BLOCK_T = min(triton.next_power_of_2(T), 64)
 
-    # Reference gradients via autograd on the padded conv.
-    x_ref = x_dt.detach().requires_grad_(True)
-    halo_ref = halo_dt.detach().requires_grad_(True)
-    padded = torch.cat([halo_ref, x_ref], dim=2)  # type: ignore
-    out_ref = F.conv1d(padded, W_conv.unsqueeze(1), groups=d)
+    # Reference gradients via autograd on the padded conv in (B, d, T) layout.
+    x_ref = x_f.detach().requires_grad_(True)
+    halo_ref = halo.detach().requires_grad_(True)
+    padded = torch.cat([halo_ref.transpose(1, 2), x_ref.transpose(1, 2)], dim=2)
+    out_ref = F.conv1d(padded, W_conv.unsqueeze(1), groups=d).transpose(1, 2)
     d_conv = torch.ones_like(out_ref)  # type: ignore
     out_ref.backward(d_conv)
 
     # Triton SP backward.
     dX_tri, dHalo_tri, dW_tri = causal_dwconv_bwd_sp(
         d_conv.contiguous(),
-        x_dt,
-        halo_dt,
+        x_f,
+        halo,
         W_conv,
         T,
         k,

@@ -78,9 +78,8 @@ class GDNet(nn.Module):
         conv_size: int,
         sp_group: dist.ProcessGroup,
     ) -> tuple:
-        x_dt = fwd.permute(0, 2, 1).contiguous()
-        edge, halo_dt, work = begin_halo_recv(x_dt, conv_size, sp_group)
-        return x_dt, edge, halo_dt, work
+        edge, halo, work = begin_halo_recv(fwd, conv_size, sp_group)
+        return edge, halo, work
 
     def one_cycle(
         self,

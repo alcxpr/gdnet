@@ -40,32 +40,34 @@ def _bwd_p2p_ops(
 
 
 def begin_halo_recv(
-    x_dt: torch.Tensor,
+    x: torch.Tensor,
     k: int,
     sp_group: dist.ProcessGroup,
 ) -> tuple[torch.Tensor, torch.Tensor, list]:
     """Issue async P2P recv for the left halo without blocking.
 
-    Returns (edge, halo_dt, work).
-    - edge: the contiguous send buffer; caller must keep it alive until work completes.
-    - halo_dt: pre-allocated recv buffer, filled when work completes.
+    x: (B, T, d) contiguous input; edge slice is (B, k-1, d).
+
+    Returns (edge, halo, work).
+    - edge: contiguous send buffer (B, k-1, d); caller must keep alive until work completes.
+    - halo: pre-allocated recv buffer (B, k-1, d), filled when work completes.
     - work: list of NCCL request handles; caller calls req.wait() on each.
     """
     rank = dist.get_rank(sp_group)
     world_size = dist.get_world_size(sp_group)
-    B, d, _ = x_dt.shape
-    edge = x_dt[:, :, -(k - 1) :].contiguous()
-    halo_dt = torch.zeros(B, d, k - 1, dtype=x_dt.dtype, device=x_dt.device)  # type: ignore
-    ops = _fwd_p2p_ops(edge, halo_dt, rank, world_size, sp_group)
+    B, _, d = x.shape
+    edge = x[:, -(k - 1) :, :].contiguous()
+    halo = torch.zeros(B, k - 1, d, dtype=x.dtype, device=x.device)  # type: ignore
+    ops = _fwd_p2p_ops(edge, halo, rank, world_size, sp_group)
     work = dist.batch_isend_irecv(ops) if ops else []
-    return edge, halo_dt, work
+    return edge, halo, work
 
 
 class FusedHaloConvSP(torch.autograd.Function):
     """Fused SP halo exchange + causal depthwise conv.
 
     The caller owns the forward recv: call begin_halo_recv, do other compute,
-    wait for work, then pass halo_dt here. This lets inter-layer compute overlap
+    wait for work, then pass halo here. This lets inter-layer compute overlap
     with the in-flight P2P transfer.
 
     Backward issues batch_isend_irecv immediately after the Triton bwd kernel --
@@ -78,8 +80,8 @@ class FusedHaloConvSP(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        x_dt: torch.Tensor,
-        halo_dt: torch.Tensor,
+        x: torch.Tensor,
+        halo: torch.Tensor,
         W_conv: torch.Tensor,
         T: int,
         k: int,
@@ -88,28 +90,28 @@ class FusedHaloConvSP(torch.autograd.Function):
     ) -> torch.Tensor:
         rank = dist.get_rank(sp_group)
         world_size = dist.get_world_size(sp_group)
-        conv_out = causal_dwconv_fwd_sp(x_dt, halo_dt, W_conv, T, k, BLOCK_T)
-        ctx.save_for_backward(x_dt, halo_dt, W_conv)
+        conv_out = causal_dwconv_fwd_sp(x, halo, W_conv, T, k, BLOCK_T)
+        ctx.save_for_backward(x, halo, W_conv)
         ctx.T, ctx.k, ctx.BLOCK_T = T, k, BLOCK_T
         ctx.sp = (rank, world_size, sp_group)
         return conv_out
 
     @staticmethod
-    def backward(ctx, d_conv_dt: torch.Tensor):  # type: ignore
-        x_dt, halo_dt, W_conv = ctx.saved_tensors
+    def backward(ctx, d_conv: torch.Tensor):  # type: ignore
+        x, halo, W_conv = ctx.saved_tensors
         rank, world_size, sp_group = ctx.sp
 
-        dX_dt, dHalo_dt, dW_conv = causal_dwconv_bwd_sp(
-            d_conv_dt.contiguous(), x_dt, halo_dt, W_conv, ctx.T, ctx.k, ctx.BLOCK_T
+        dX, dHalo, dW_conv = causal_dwconv_bwd_sp(
+            d_conv.contiguous(), x, halo, W_conv, ctx.T, ctx.k, ctx.BLOCK_T
         )
 
-        grad_edge = torch.zeros_like(dHalo_dt)  # type: ignore
-        ops = _bwd_p2p_ops(dHalo_dt, grad_edge, rank, world_size, sp_group)
+        grad_edge = torch.zeros_like(dHalo)  # type: ignore
+        ops = _bwd_p2p_ops(dHalo, grad_edge, rank, world_size, sp_group)
         work = dist.batch_isend_irecv(ops) if ops else []
         for req in work:
             req.wait()
 
         if rank < world_size - 1:
-            dX_dt[:, :, -(ctx.k - 1) :] = dX_dt[:, :, -(ctx.k - 1) :] + grad_edge
+            dX[:, -(ctx.k - 1) :, :] = dX[:, -(ctx.k - 1) :, :] + grad_edge
 
-        return dX_dt, None, dW_conv, None, None, None, None
+        return dX, None, dW_conv, None, None, None, None
