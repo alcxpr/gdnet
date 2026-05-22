@@ -8,7 +8,7 @@ from .kernel.gated_causal_depthwise_conv import (
     CausalDWConvFunction,
     gated_output,
 )
-from .utils.sp import FusedHaloConvSP, begin_halo_recv
+from .utils.sp import FusedHaloConvSP
 
 
 class CausalDepthWiseConv1d(nn.Module):
@@ -113,27 +113,12 @@ class GDLayer(nn.Module):
         fwd: torch.Tensor,
         conv_module: CausalDepthWiseConv1d,
         sp_group: dist.ProcessGroup,
-        pending_recv: tuple | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """SP variant: fused halo exchange + Triton conv, return (conv_3d, conv_flat).
-
-        pending_recv, if provided, is (edge, halo, work) from a prior begin_halo_recv
-        call. work is waited on before the conv. If None, the recv is issued here.
-        """
         B, T, d = fwd.shape
         k = conv_module.size
         BLOCK_T = min(triton.next_power_of_2(T), 64)
         W_conv = conv_module.conv.weight.squeeze(1)
-
-        if pending_recv is not None:
-            _edge, halo, work = pending_recv
-        else:
-            _edge, halo, work = begin_halo_recv(fwd, k, sp_group)
-
-        for req in work:
-            req.wait()
-
-        conv_3d = FusedHaloConvSP.apply(fwd, halo, W_conv, T, k, BLOCK_T, sp_group)
+        conv_3d = FusedHaloConvSP.apply(fwd, W_conv, T, k, BLOCK_T, sp_group, id(conv_module))
         return conv_3d, conv_3d.view(B * T, d)
 
     def fwd_step(
@@ -165,22 +150,10 @@ class GDLayer(nn.Module):
         fwd: torch.Tensor,
         side: torch.Tensor,
         sp_group: dist.ProcessGroup,
-        pending_recv: tuple | None = None,
         return_gate: bool = False,
     ) -> tuple[torch.Tensor, ...]:
-        """SP variant of fwd_step: performs halo exchange before the causal conv.
-
-        Args:
-            fwd: Local forward stream (B, T_local, d).
-            side: Local side stream (B, T_local, d).
-            sp_group: Sequence-parallel process group.
-            return_gate: If True, also return the gate values.
-
-        Returns:
-            (fwd_out, side_out) or (fwd_out, side_out, gate) if return_gate.
-        """
         B, T, d = fwd.shape
-        conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_fwd, sp_group, pending_recv)
+        conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_fwd, sp_group)
         R = self._recovery("rf", side, conv_3d)
         fwd_out, side_out = gated_output(
             conv_flat,
@@ -225,20 +198,9 @@ class GDLayer(nn.Module):
         fwd: torch.Tensor,
         side: torch.Tensor,
         sp_group: dist.ProcessGroup,
-        pending_recv: tuple | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """SP variant of bwd_step: performs halo exchange before the causal conv.
-
-        Args:
-            fwd: Local forward stream (B, T_local, d).
-            side: Local side stream (B, T_local, d).
-            sp_group: Sequence-parallel process group.
-
-        Returns:
-            (fwd_out, side_out).
-        """
         B, T, d = fwd.shape
-        conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_bwd, sp_group, pending_recv)
+        conv_3d, conv_flat = self._conv_flat_sp(fwd, self.conv_bwd, sp_group)
         R = self._recovery("rb", side, conv_3d)
         fwd_out, side_out = gated_output(
             conv_flat,

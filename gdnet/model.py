@@ -8,7 +8,6 @@ import torch.nn.functional as F
 from .layer import GDLayer
 from .memory import Memory as CAM
 from .operators import TransitionOperators
-from .utils.sp import begin_halo_recv
 
 
 class GDNet(nn.Module):
@@ -72,15 +71,6 @@ class GDNet(nn.Module):
         self.cam_enabled = True
         self.trans_enabled = True
 
-    def _prefetch(
-        self,
-        fwd: torch.Tensor,
-        conv_size: int,
-        sp_group: dist.ProcessGroup,
-    ) -> tuple:
-        edge, halo, work = begin_halo_recv(fwd, conv_size, sp_group)
-        return edge, halo, work
-
     def one_cycle(
         self,
         fwd: torch.Tensor,
@@ -97,31 +87,15 @@ class GDNet(nn.Module):
         Returns:
             Updated `(fwd, side)`.
         """
-        pending = None
         for i, layer in enumerate(self.layers):
             if sp_group is not None:
-                fwd, side[i] = layer.fwd_step_sp(
-                    fwd, side[i], sp_group, pending_recv=pending
-                )  # type: ignore
-                pending = (
-                    self._prefetch(fwd, self.layers[i + 1].conv_fwd.size, sp_group)  # type: ignore
-                    if i + 1 < len(self.layers)
-                    else None
-                )
+                fwd, side[i] = layer.fwd_step_sp(fwd, side[i], sp_group)  # type: ignore
             else:
                 fwd, side[i] = layer.fwd_step(fwd, side[i])  # type: ignore
 
-        pending = None
         for i, layer in reversed(list(enumerate(self.layers))):
             if sp_group is not None:
-                fwd, side[i] = layer.bwd_step_sp(
-                    fwd, side[i], sp_group, pending_recv=pending
-                )  # type: ignore
-                pending = (
-                    self._prefetch(fwd, self.layers[i - 1].conv_bwd.size, sp_group)  # type: ignore
-                    if i - 1 >= 0
-                    else None
-                )
+                fwd, side[i] = layer.bwd_step_sp(fwd, side[i], sp_group)  # type: ignore
             else:
                 fwd, side[i] = layer.bwd_step(fwd, side[i])  # type: ignore
         return fwd, side
@@ -182,43 +156,17 @@ class GDNet(nn.Module):
         gate_vals: list[torch.Tensor] = []
         for _ in range(self.n_cycles):
             if return_gates:
-                pending = None
                 for i, layer in enumerate(self.layers):
                     if sp_group is not None:
                         fwd, side[i], g = layer.fwd_step_sp(  # type: ignore
-                            fwd,
-                            side[i],
-                            sp_group,
-                            pending_recv=pending,
-                            return_gate=True,
-                        )
-                        pending = (
-                            self._prefetch(
-                                fwd,
-                                self.layers[i + 1].conv_fwd.size,  # type: ignore
-                                sp_group,
-                            )
-                            if i + 1 < len(self.layers)
-                            else None
+                            fwd, side[i], sp_group, return_gate=True
                         )
                     else:
                         fwd, side[i], g = layer.fwd_step(fwd, side[i], return_gate=True)  # type: ignore
                     gate_vals.append(g)
-                pending = None
                 for i, layer in reversed(list(enumerate(self.layers))):
                     if sp_group is not None:
-                        fwd, side[i] = layer.bwd_step_sp(
-                            fwd, side[i], sp_group, pending_recv=pending
-                        )  # type: ignore
-                        pending = (
-                            self._prefetch(
-                                fwd,
-                                self.layers[i - 1].conv_bwd.size,  # type: ignore
-                                sp_group,
-                            )
-                            if i - 1 >= 0
-                            else None
-                        )
+                        fwd, side[i] = layer.bwd_step_sp(fwd, side[i], sp_group)  # type: ignore
                     else:
                         fwd, side[i] = layer.bwd_step(fwd, side[i])  # type: ignore
             else:
