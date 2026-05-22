@@ -20,6 +20,15 @@ def _copy_stream() -> torch.cuda.Stream:
     return _COPY_STREAMS[dev]
 
 
+def clear_symm_handles() -> None:
+    """Release all cached symmetric memory handles.
+
+    Call this collectively on all SP ranks between benchmark configs or whenever
+    the batch size or model changes and the old handles should be freed.
+    """
+    _SYMM_HANDLES.clear()
+
+
 class _SymmHaloHandle:
     def __init__(
         self,
@@ -32,7 +41,9 @@ class _SymmHaloHandle:
     ) -> None:
         self.rank = dist.get_rank(sp_group)
         self.world_size = dist.get_world_size(sp_group)
-        self.shape = (B, km1, d)
+        self.B = B
+        self.km1 = km1
+        self.d = d
         self.dtype = dtype
         flat = B * km1 * d
         device = torch.device(f"cuda:{torch.cuda.current_device()}")  # type: ignore
@@ -52,10 +63,12 @@ def _get_symm_handle(
     dtype: torch.dtype,  # type: ignore
     sp_group: dist.ProcessGroup,
 ) -> _SymmHaloHandle:
-    key = (layer_id, sp_group, B, km1, d, dtype)
-    if key not in _SYMM_HANDLES:
+    key = (layer_id, sp_group, km1, d, dtype)
+    hdl = _SYMM_HANDLES.get(key)
+    if hdl is None or B > hdl.B:
         _SYMM_HANDLES[key] = _SymmHaloHandle(layer_id, B, km1, d, dtype, sp_group)
-    return _SYMM_HANDLES[key]
+        hdl = _SYMM_HANDLES[key]
+    return hdl
 
 
 class FusedHaloConvSP(torch.autograd.Function):
@@ -83,13 +96,13 @@ class FusedHaloConvSP(torch.autograd.Function):
             edge_ready.record()
             cs.wait_event(edge_ready)
             with torch.cuda.stream(cs):
-                peer_fwd = hdl.fwd_hdl.get_buffer(rank + 1, hdl.shape, x.dtype)
+                peer_fwd = hdl.fwd_hdl.get_buffer(rank + 1, (B, km1, d), x.dtype)
                 peer_fwd.copy_(edge)
                 hdl.fwd_hdl.put_signal(rank + 1)
 
         if rank > 0:
             hdl.fwd_hdl.wait_signal(rank - 1)
-            halo = hdl._fwd.view(B, km1, d).clone()
+            halo = hdl._fwd[: B * km1 * d].view(B, km1, d).clone()
         else:
             halo = torch.zeros(B, km1, d, dtype=x.dtype, device=x.device)  # type: ignore
 
@@ -98,6 +111,7 @@ class FusedHaloConvSP(torch.autograd.Function):
         ctx.T, ctx.k, ctx.BLOCK_T = T, k, BLOCK_T
         ctx.sp = (rank, world_size, sp_group)
         ctx.hdl = hdl
+        ctx.B = B
         return conv_out
 
     @staticmethod
@@ -107,6 +121,7 @@ class FusedHaloConvSP(torch.autograd.Function):
         hdl: _SymmHaloHandle = ctx.hdl
         B, _, d = x.shape
         k = ctx.k
+        km1 = k - 1
 
         dX, dHalo, dW_conv = causal_dwconv_bwd_sp(
             d_conv.contiguous(), x, halo, W_conv, ctx.T, k, ctx.BLOCK_T
@@ -118,12 +133,12 @@ class FusedHaloConvSP(torch.autograd.Function):
             kernel_done.record()
             cs.wait_event(kernel_done)
             with torch.cuda.stream(cs):
-                peer_bwd = hdl.bwd_hdl.get_buffer(rank - 1, hdl.shape, x.dtype)
+                peer_bwd = hdl.bwd_hdl.get_buffer(rank - 1, (B, km1, d), x.dtype)
                 peer_bwd.copy_(dHalo)
                 hdl.bwd_hdl.put_signal(rank - 1)
 
         if rank < world_size - 1:
             hdl.bwd_hdl.wait_signal(rank + 1)
-            dX[:, -(k - 1) :, :].add_(hdl._bwd.view(B, k - 1, d))
+            dX[:, -km1:, :].add_(hdl._bwd[: B * km1 * d].view(B, km1, d))
 
         return dX, dW_conv, None, None, None, None

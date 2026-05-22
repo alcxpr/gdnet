@@ -43,6 +43,7 @@ from gdnet.utils.distributed import (
     is_main_process,
 )
 from gdnet.utils.fp8 import Precision, convert_to_fp8, update_fp8_scales
+from gdnet.utils.sp import clear_symm_handles
 
 VOCAB_SIZE = 100_277
 N_WRITE = 4
@@ -292,6 +293,7 @@ def run_config(
 
     del model
     torch.cuda.empty_cache()
+    clear_symm_handles()
     return ms_per_step, tokens_per_sec, total_params, non_embed_params, peak_mem_gb
 
 
