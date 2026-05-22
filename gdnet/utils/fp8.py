@@ -4,11 +4,44 @@ from contextlib import nullcontext
 from typing import Literal
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from gdnet.kernel.fp8_linear import FP8Linear
+from gdnet.kernel.fp8_linear.quantize import FP8_MAX
 
 Precision = Literal["fp32", "bf16", "fp8"]
+
+
+def update_fp8_scales(model: nn.Module) -> None:
+    """Collect per-layer amax buffers, do one batched allreduce, update all scales.
+
+    Call this from the training loop every scale_update_freq steps before the
+    optimizer step. Resets amax buffers after reading so the next window starts
+    clean.
+    """
+    mods = [m for m in model.modules() if isinstance(m, FP8Linear)]
+    if not mods:
+        return
+
+    amax_parts: list[torch.Tensor] = []
+    for m in mods:
+        amax_parts.append(m._amax_x)
+        amax_parts.append(m._amax_w)
+    amaxes = torch.cat(amax_parts).clamp_(min=1e-12)
+
+    if dist.is_initialized():
+        dist.all_reduce(amaxes, op=dist.ReduceOp.MAX)
+
+    for i, mod in enumerate(mods):
+        ax = amaxes[2 * i : 2 * i + 1]
+        aw = amaxes[2 * i + 1 : 2 * i + 2]
+        torch.div(FP8_MAX, ax, out=mod.scale_x)
+        torch.div(FP8_MAX, aw, out=mod.scale_w)
+        torch.reciprocal(mod.scale_x, out=mod.inv_scale_x)
+        torch.reciprocal(mod.scale_w, out=mod.inv_scale_w)
+        mod._amax_x.zero_()
+        mod._amax_w.zero_()
 
 
 def autocast(precision: Precision = "fp32"):
@@ -20,8 +53,9 @@ def autocast(precision: Precision = "fp32"):
 def convert_to_fp8(model: nn.Module) -> nn.Module:
     """Convert eligible nn.Linear layers to FP8Linear in-place.
 
-    Uses delayed per-tensor scaling (updated every 16 steps) to avoid the
-    per-step amax reduction overhead of dynamic scaling.
+    Scales are not updated here; call update_fp8_scales(model) from the training
+    loop at the desired frequency. Amax buffers accumulate across calls between
+    updates via tl.atomic_max in the Triton kernel.
 
     Skips spectral-normalized linears (weight_orig in _parameters) because SN
     replaces weight with a plain tensor computed via hook. Also skips layers

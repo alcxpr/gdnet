@@ -89,7 +89,6 @@ def quantize_fp8(
     if amax_buf is None:
         amax = torch.zeros(1, dtype=torch.float32, device=x.device)  # type: ignore
     else:
-        amax_buf.zero_()
         amax = amax_buf
 
     BLOCK_M, BLOCK_K = 64, 64

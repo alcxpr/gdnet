@@ -8,11 +8,12 @@ from .distributed import (
     launch,
     wrap_fsdp,
 )
-from .fp8 import Precision, autocast
+from .fp8 import Precision, autocast, update_fp8_scales
 
 __all__ = [
     "autocast",
     "Precision",
+    "update_fp8_scales",
     "init_distributed",
     "wrap_fsdp",
     "launch",

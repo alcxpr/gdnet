@@ -41,7 +41,7 @@ from gdnet.utils.distributed import (
     init_distributed,
     is_main_process,
 )
-from gdnet.utils.fp8 import Precision, convert_to_fp8
+from gdnet.utils.fp8 import Precision, convert_to_fp8, update_fp8_scales
 
 torch.set_float32_matmul_precision("high")
 
@@ -499,6 +499,8 @@ def main() -> None:
 
                 scheduler.step()
                 step += 1
+                if precision == "fp8" and step % 16 == 0:
+                    update_fp8_scales(base_model)
 
                 if main_proc:
                     state.step = step  # type: ignore

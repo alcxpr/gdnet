@@ -42,7 +42,7 @@ from gdnet.utils.distributed import (
     init_distributed,
     is_main_process,
 )
-from gdnet.utils.fp8 import Precision, convert_to_fp8
+from gdnet.utils.fp8 import Precision, convert_to_fp8, update_fp8_scales
 
 VOCAB_SIZE = 100_277
 N_WRITE = 4
@@ -265,6 +265,8 @@ def run_config(
             write_chunks=write_chunks,
             sp_group=sp_group,
         )
+        if precision == "fp8" and i % 16 == 0:
+            update_fp8_scales(base_model)
     torch.cuda.synchronize(device)
 
     torch.cuda.reset_peak_memory_stats(device)
@@ -280,6 +282,8 @@ def run_config(
             write_chunks=write_chunks,
             sp_group=sp_group,
         )
+        if precision == "fp8" and i % 16 == 0:
+            update_fp8_scales(base_model)
     torch.cuda.synchronize(device)
 
     ms_per_step = (time.perf_counter() - t0) / n_steps * 1000

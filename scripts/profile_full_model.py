@@ -42,7 +42,7 @@ from gdnet.utils.distributed import (
     init_distributed,
     is_main_process,
 )
-from gdnet.utils.fp8 import Precision, convert_to_fp8
+from gdnet.utils.fp8 import Precision, convert_to_fp8, update_fp8_scales
 
 VOCAB_SIZE = 100_277
 B = 4
@@ -115,6 +115,8 @@ def run(
             write_chunks=write_chunks,
             sp_group=sp_group,
         )
+        if precision == "fp8" and i % 16 == 0:
+            update_fp8_scales(base_model)
 
     for i in range(n_warmup):
         step(i)
