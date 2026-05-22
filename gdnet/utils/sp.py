@@ -55,8 +55,6 @@ class _SymmHaloHandle:
         self._bwd = bwd_t
         self._fwd_stage = torch.empty(flat, dtype=dtype, device=device)  # type: ignore
         self._bwd_stage = torch.empty(flat, dtype=dtype, device=device)  # type: ignore
-        self._fwd_ev = torch.cuda.Event()
-        self._bwd_ev = torch.cuda.Event()
 
 
 def _get_symm_handle(
@@ -96,10 +94,11 @@ class FusedHaloConvSP(torch.autograd.Function):
         if rank < world_size - 1:
             edge = x[:, -km1:, :].contiguous()
             hdl._fwd_stage[: B * km1 * d].view(B, km1, d).copy_(edge)
-            hdl._fwd_ev.record()
+            ev = torch.cuda.Event()
+            ev.record()
             cs = _copy_stream()
             with torch.cuda.stream(cs):
-                cs.wait_event(hdl._fwd_ev)
+                cs.wait_event(ev)
                 peer_fwd = hdl.fwd_hdl.get_buffer(rank + 1, (B, km1, d), x.dtype)
                 peer_fwd.copy_(hdl._fwd_stage[: B * km1 * d].view(B, km1, d))
                 hdl.fwd_hdl.put_signal(rank + 1)
@@ -132,10 +131,11 @@ class FusedHaloConvSP(torch.autograd.Function):
 
         if rank > 0:
             hdl._bwd_stage[: B * km1 * d].view(B, km1, d).copy_(dHalo)
-            hdl._bwd_ev.record()
+            ev = torch.cuda.Event()
+            ev.record()
             cs = _copy_stream()
             with torch.cuda.stream(cs):
-                cs.wait_event(hdl._bwd_ev)
+                cs.wait_event(ev)
                 peer_bwd = hdl.bwd_hdl.get_buffer(rank - 1, (B, km1, d), x.dtype)
                 peer_bwd.copy_(hdl._bwd_stage[: B * km1 * d].view(B, km1, d))
                 hdl.bwd_hdl.put_signal(rank - 1)
