@@ -171,7 +171,7 @@ def projected_step(
             else:
                 loss_task.backward(retain_graph=True)
         if sp_group is not None:
-            flush_bwd_halos()
+            flush_bwd_halos(sp_group)
 
         for acc, p in zip(g_task, params):
             if p.grad is not None:
@@ -202,7 +202,7 @@ def projected_step(
             else:
                 loss_info.backward(retain_graph=need_trans)
         if sp_group is not None:
-            flush_bwd_halos()
+            flush_bwd_halos(sp_group)
 
         if need_trans:
             with make_autocast(precision):  # type: ignore

@@ -11,6 +11,7 @@ from ..kernel.gated_causal_depthwise_conv.conv import (
 
 _SYMM_HANDLES: dict = {}
 _COPY_STREAMS: dict[int, torch.cuda.Stream] = {}
+_BATCH_HANDLES: dict = {}
 _PENDING_BWD_HALOS: list = []
 
 
@@ -21,6 +22,15 @@ def _copy_stream() -> torch.cuda.Stream:
     return _COPY_STREAMS[dev]
 
 
+def _get_batch_handle(sp_group: dist.ProcessGroup):
+    key = id(sp_group)
+    if key not in _BATCH_HANDLES:
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")  # type: ignore
+        t = symm_mod.empty(1, dtype=torch.uint8, device=device)
+        _BATCH_HANDLES[key] = symm_mod.rendezvous(t, sp_group)
+    return _BATCH_HANDLES[key]
+
+
 def clear_symm_handles() -> None:
     """Release all cached symmetric memory handles.
 
@@ -28,13 +38,21 @@ def clear_symm_handles() -> None:
     the batch size or model changes and the old handles should be freed.
     """
     _SYMM_HANDLES.clear()
+    _BATCH_HANDLES.clear()
 
 
-def flush_bwd_halos() -> None:
-    for dX_slice, hdl, B, km1, d, rank in _PENDING_BWD_HALOS:
-        hdl.bwd_hdl.wait_signal(rank + 1)
-        dX_slice.add_(hdl._bwd[: B * km1 * d].view(B, km1, d))
-    _PENDING_BWD_HALOS.clear()
+def flush_bwd_halos(sp_group: dist.ProcessGroup) -> None:
+    rank = dist.get_rank(sp_group)
+    world_size = dist.get_world_size(sp_group)
+    batch_hdl = _get_batch_handle(sp_group)
+    if rank > 0:
+        with torch.cuda.stream(_copy_stream()):
+            batch_hdl.put_signal(rank - 1)
+    if rank < world_size - 1:
+        batch_hdl.wait_signal(rank + 1)
+        for dX_slice, hdl, B, km1, d in _PENDING_BWD_HALOS:
+            dX_slice.add_(hdl._bwd[: B * km1 * d].view(B, km1, d))
+        _PENDING_BWD_HALOS.clear()
 
 
 class _SymmHaloHandle:
@@ -146,9 +164,7 @@ class FusedHaloConvSP(torch.autograd.Function):
                 cs.wait_event(ev)
                 peer_bwd = hdl.bwd_hdl.get_buffer(rank - 1, (B, km1, d), x.dtype)
                 peer_bwd.copy_(hdl._bwd_stage[: B * km1 * d].view(B, km1, d))
-                hdl.bwd_hdl.put_signal(rank - 1)
-
         if rank < world_size - 1:
-            _PENDING_BWD_HALOS.append((dX[:, -km1:, :], hdl, B, km1, d, rank))
+            _PENDING_BWD_HALOS.append((dX[:, -km1:, :], hdl, B, km1, d))
 
         return dX, dW_conv, None, None, None, None
