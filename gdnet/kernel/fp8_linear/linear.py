@@ -45,7 +45,7 @@ class _Fp8LinearFn(torch.autograd.Function):
         go_fp8, go_fp8_col, _ = quantize_fp8(grad_out, scale=scale_go, need_col=True)
         dgrad = torch._scaled_mm(  # type: ignore
             w_fp8_col,
-            go_fp8.T,
+            go_fp8.T.contiguous(),
             scale_a=inv_scale_w,
             scale_b=inv_scale_go,
             out_dtype=torch.bfloat16,  # type: ignore
