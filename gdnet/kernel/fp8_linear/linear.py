@@ -100,7 +100,6 @@ class FP8Linear(nn.Module):
         self.register_buffer("_amax_w", torch.zeros(1, dtype=torch.float32, device=dev))  # type: ignore
         self.register_buffer("_amax_x", torch.zeros(1, dtype=torch.float32, device=dev))  # type: ignore
 
-    @torch.compiler.disable
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore
         shape = x.shape
         x_flat = x.reshape(-1, shape[-1]).bfloat16()
