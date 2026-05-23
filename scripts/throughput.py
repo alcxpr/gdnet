@@ -304,6 +304,8 @@ def run_config(
     del model
     torch.cuda.empty_cache()
     clear_symm_handles()
+    if compile_model:
+        torch._dynamo.reset()
     return ms_per_step, tokens_per_sec, total_params, non_embed_params, peak_mem_gb
 
 
