@@ -216,7 +216,7 @@ def projected_step(
                 else:
                     loss_trans.backward()
             if sp_group is not None:
-                flush_bwd_halos()
+                flush_bwd_halos(sp_group)
 
         for acc, p in zip(g_info, params):
             if p.grad is not None:
