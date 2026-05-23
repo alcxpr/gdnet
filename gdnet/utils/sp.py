@@ -26,7 +26,7 @@ def _get_batch_handle(sp_group: dist.ProcessGroup):
     key = id(sp_group)
     if key not in _BATCH_HANDLES:
         device = torch.device(f"cuda:{torch.cuda.current_device()}")  # type: ignore
-        t = symm_mod.empty(1, dtype=torch.uint8, device=device)
+        t = symm_mod.empty(1, dtype=torch.uint8, device=device)  # type: ignore
         _BATCH_HANDLES[key] = symm_mod.rendezvous(t, sp_group)
     return _BATCH_HANDLES[key]
 

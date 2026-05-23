@@ -240,10 +240,15 @@ def projected_step(
 
     if dist.is_initialized():
         world_size = dist.get_world_size()
-        for p in params:
-            if p.grad is not None:
-                dist.all_reduce(p.grad)
-                p.grad /= world_size
+        grads = [p.grad for p in params if p.grad is not None]
+        flat = torch.cat([g.reshape(-1) for g in grads])  # type: ignore
+        dist.all_reduce(flat)
+        flat.div_(world_size)
+        offset = 0
+        for g in grads:
+            n = g.numel()
+            g.copy_(flat[offset : offset + n].reshape(g.shape))
+            offset += n
 
     if grad_clip > 0.0:
         if scaler:
