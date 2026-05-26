@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,6 +19,10 @@ class Memory(nn.Module):
         sim_pos     = einsum("bd,sd->bs", gamma, e)
         w           = softmax(sim_content + exp(rho) * sim_pos)
         retrieved_c = einsum("bs,bsd->bd", w, buffer_vals)
+        h           = H(w) / log(n_slots)         - normalized retrieval entropy
+
+    R gate input is [side, fwd, retrieved, h] (d*3+1). h gives R a direct signal
+    distinguishing a confident hit (low h) from a diffuse or wrong retrieval (high h).
 
     W_pos is zero-initialized so gamma starts at 0.5, without any initial recency bias.
     W_slot uses geometric decay init (decay=0.85) for a soft recency prior that
@@ -59,7 +65,7 @@ class Memory(nn.Module):
         self.W_c = nn.Linear(d, d_c, bias=False)
         self.W_d = nn.Linear(d_c, d, bias=False)
         self.W_up = nn.Linear(d_c, d, bias=False)
-        self.W_r1 = nn.utils.spectral_norm(nn.Linear(d * 3, d))
+        self.W_r1 = nn.utils.spectral_norm(nn.Linear(d * 3 + 1, d))
         self.W_r2 = nn.Linear(d, d)
         self.r_norm = nn.RMSNorm(d)
         nn.init.normal_(self.W_r2.weight, std=0.01)
@@ -116,13 +122,17 @@ class Memory(nn.Module):
         gamma = F.sigmoid(self.W_pos(q))
         slot_ids = torch.arange(self.n_slots, device=fwd.device)  # type: ignore[reportPrivateImportUsage]
         e = self.W_slot(slot_ids)
-        retrieved_c, w = fused_mem_read(q, gamma, e, buffer_tags, buffer_vals, self.rho)
+        retrieved_c, w = fused_mem_read(q, gamma, e, buffer_tags, buffer_vals, self.rho)  # type: ignore
         retrieved = self.W_up(retrieved_c)
         retrieved_e = retrieved.unsqueeze(1).expand_as(fwd)
+        h = -(w * (w + 1e-8).log()).sum(-1) / math.log(self.n_slots)
+        h_seq = h.unsqueeze(1).unsqueeze(2).expand(fwd.shape[0], fwd.shape[1], 1)
         R = F.sigmoid(
             self.r_norm(
                 self.W_r2(
-                    F.silu(self.W_r1(torch.cat([side, fwd, retrieved_e], dim=-1)))  # type: ignore[reportPrivateImportUsage]
+                    F.silu(
+                        self.W_r1(torch.cat([side, fwd, retrieved_e, h_seq], dim=-1))
+                    )  # type: ignore[reportPrivateImportUsage]
                 )
             )
         )

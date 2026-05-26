@@ -18,7 +18,7 @@ class FusedMemReadFunction(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         tensors = [t.contiguous() for t in (q, gamma, e, buffer_tags, buffer_vals)]
         alpha_c = alpha.contiguous()
-        retrieved_c, w = fused_mem_read_fwd(*tensors, alpha_c)
+        retrieved_c, w = fused_mem_read_fwd(*tensors, alpha_c)  # type: ignore
         ctx.save_for_backward(*tensors, w, alpha_c)
         ctx.dtype = q.dtype
         return retrieved_c, w
