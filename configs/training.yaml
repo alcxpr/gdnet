@@ -7,8 +7,9 @@ kernel_size: 9
 n_slots: 32
 
 tokenizer: cl100k_base
-token_budget: 32768
+token_budget: 65536
 seed: 42
+sp_size: 2
 
 lr: 3.0e-4
 min_lr_ratio: 0.1
@@ -19,7 +20,7 @@ grad_clip: 1.0
 beta_proj: 0.1
 
 warmup_steps: 2000
-decay_start: 800000
+decay_start: 125000
 
 # Sequential curriculum. Each phase runs for `steps` steps then the next begins.
 # dataset: fineweb-edu | nemotron
@@ -32,24 +33,24 @@ phases:
       seq_len: 8192
       min_int_score: 5
       max_int_score: 5
-      steps: 200000
+      steps: 38000
     - dataset: fineweb-edu
       subset: sample-10BT
       seq_len: 8192
       min_int_score: 3
       max_int_score: 4
-      steps: 200000
+      steps: 38000
     - dataset: fineweb-edu
       subset: sample-10BT
       seq_len: 16384
       min_int_score: 5
       max_int_score: 5
-      steps: 200000
+      steps: 38000
     - dataset: nemotron
       subset: everything
       seq_len: 8192
       min_chars: 0
-      steps: 400000
+      steps: 38000
 
 n_write: 4
 accum_steps: 1

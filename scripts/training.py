@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pynvml
 import torch
 import torch._functorch.config
+import torch.distributed as dist
 import watchfiles
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -35,10 +36,12 @@ from gdnet.loss import projected_step
 from gdnet.model import GDNet
 from gdnet.utils.distributed import (
     destroy,
+    get_dp_group,
     get_rank,
     get_sp_group,
     get_world_size,
     init_distributed,
+    init_process_groups,
     is_main_process,
 )
 from gdnet.utils.fp8 import Precision, convert_to_fp8, update_fp8_scales
@@ -69,6 +72,7 @@ class Config:
     grad_clip: float = 1.0
     beta_proj: float = 0.1
     accum_steps: int = 1
+    sp_size: int = 2
     # WSD schedule
     warmup_steps: int = 2_000
     decay_start: int = 80_000
@@ -180,10 +184,10 @@ class Shell:
             for i, h in enumerate(self._handles):
                 util = pynvml.nvmlDeviceGetUtilizationRates(h)
                 mem = pynvml.nvmlDeviceGetMemoryInfo(h)
-                used = mem.used / 1024**3
-                total = mem.total / 1024**3
+                used = mem.used / 1024**3  # type: ignore
+                total = mem.total / 1024**3  # type: ignore
                 self._write(
-                    f"gpu[{i}]  util={util.gpu}%  mem={used:.1f}/{total:.1f} GB  ({used/total*100:.1f}%)\n"
+                    f"gpu[{i}]  util={util.gpu}%  mem={used:.1f}/{total:.1f} GB  ({used / total * 100:.1f}%)\n"
                 )
 
         elif cmd == "save":
@@ -347,17 +351,23 @@ def main() -> None:
     precision: Precision = cfg.precision  # type: ignore
 
     init_distributed()
+    init_process_groups(cfg.sp_size)
     rank = get_rank()
     world_size = get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     sp_group = get_sp_group()
+    dp_group = get_dp_group()
+    sp_size = dist.get_world_size(sp_group) if sp_group is not None else 1
+    sp_rank = dist.get_rank(sp_group) if sp_group is not None else 0
+    dp_size = dist.get_world_size(dp_group) if dp_group is not None else 1
+    dp_rank = dist.get_rank(dp_group) if dp_group is not None else 0
     main_proc = is_main_process()
     device = torch.device(f"cuda:{local_rank}")  # type: ignore
 
     max_seq_len = max(p["seq_len"] for p in cfg.phases)
-    if max_seq_len % world_size != 0:
+    if max_seq_len % sp_size != 0:
         raise ValueError(
-            f"max seq_len {max_seq_len} must be divisible by world_size {world_size}"
+            f"max seq_len {max_seq_len} must be divisible by sp_size {sp_size}"
         )
 
     model = GDNet(
@@ -366,7 +376,7 @@ def main() -> None:
         d=cfg.d,
         n_layers=cfg.n_layers,
         n_cycles=cfg.n_cycles,
-        chunk_size=max_seq_len // world_size,
+        chunk_size=max_seq_len // sp_size,
         kernel_size=cfg.kernel_size,
         n_slots=cfg.n_slots,
     ).cuda()
@@ -379,7 +389,14 @@ def main() -> None:
         convert_to_fp8(model)
 
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], static_graph=True, bucket_cap_mb=200)  # type: ignore
+        model = DDP(  # type: ignore
+            model,
+            device_ids=[local_rank],
+            process_group=dp_group,
+            static_graph=True,
+            bucket_cap_mb=200,
+            broadcast_buffers=False,
+        )
 
     if cfg.compile:
         torch._functorch.config.donated_buffer = False
@@ -390,7 +407,7 @@ def main() -> None:
 
     import bitsandbytes as bnb
 
-    optimizer = bnb.optim.AdamW8bit(
+    optimizer = bnb.optim.AdamW8bit(  # type: ignore
         model.parameters(),  # type: ignore
         lr=cfg.lr,
         betas=(cfg.beta1, cfg.beta2),
@@ -444,15 +461,17 @@ def main() -> None:
 
             source = phase.get("dataset", "fineweb-edu")
             T = phase["seq_len"]
-            if T % world_size != 0:
+            if T % sp_size != 0:
                 raise ValueError(
-                    f"phase seq_len {T} must be divisible by world_size {world_size}"
+                    f"phase seq_len {T} must be divisible by sp_size {sp_size}"
                 )
-            T_local = T // world_size
-            B = max(1, cfg.token_budget // T)
+            T_local = T // sp_size
+            B = max(dp_size, (cfg.token_budget // T // dp_size) * dp_size)
 
             if main_proc:
-                state.phase = f"{source}  seq_len={T}  B={B}  steps {phase_start}-{phase_end}"  # type: ignore
+                state.phase = (  # type: ignore
+                    f"{source}  seq_len={T}  B={B}  steps {phase_start}-{phase_end}"  # type: ignore
+                )
 
             if phase.get("path"):
                 _wait_for_file(phase["path"], rank)
@@ -475,13 +494,16 @@ def main() -> None:
                 if main_proc and stop_event.is_set():  # type: ignore
                     break
 
-                tokens = seq[:, :-1][:, rank * T_local : (rank + 1) * T_local]
-                targets = seq[:, 1:][:, rank * T_local : (rank + 1) * T_local]
+                b_per_dp = B // dp_size
+                b0, b1 = dp_rank * b_per_dp, (dp_rank + 1) * b_per_dp
+                ts0, ts1 = sp_rank * T_local, (sp_rank + 1) * T_local
+                tokens = seq[b0:b1, :-1][:, ts0:ts1]
+                targets = seq[b0:b1, 1:][:, ts0:ts1]
 
                 write_chunks = None
                 if base_model.cam_enabled and len(write_buf) == cfg.n_write:
                     write_chunks = torch.stack(list(write_buf), dim=1)
-                write_buf.append(tokens.clone())
+                write_buf.append(seq[b0:b1, :-1][:, ts0:ts1].clone())
 
                 loss = projected_step(
                     model,  # type: ignore

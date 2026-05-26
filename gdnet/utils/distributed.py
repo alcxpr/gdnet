@@ -24,6 +24,31 @@ from torch.multiprocessing.spawn import spawn
 
 log = logging.getLogger(__name__)
 
+_SP_GROUP: dist.ProcessGroup | None = None
+_DP_GROUP: dist.ProcessGroup | None = None
+
+
+def init_process_groups(sp_size: int = 1) -> None:
+    if not dist.is_initialized():
+        return
+    world_size = dist.get_world_size()
+    if world_size % sp_size != 0:
+        raise ValueError(f"world_size {world_size} not divisible by sp_size {sp_size}")
+    rank = dist.get_rank()
+    dp_size = world_size // sp_size
+    global _SP_GROUP, _DP_GROUP
+    for dp_r in range(dp_size):
+        ranks = list(range(dp_r * sp_size, (dp_r + 1) * sp_size))
+        g = dist.new_group(ranks)
+        if rank in ranks:
+            _SP_GROUP = g  # type: ignore
+    for sp_r in range(sp_size):
+        ranks = list(range(sp_r, world_size, sp_size))
+        g = dist.new_group(ranks)
+        if rank in ranks:
+            _DP_GROUP = g  # type: ignore
+
+
 _FSDP_MIXED_PRECISION = MixedPrecision(
     param_dtype=torch.bfloat16,  # type: ignore
     reduce_dtype=torch.float32,  # type: ignore
@@ -169,8 +194,15 @@ def is_main_process() -> bool:
 
 
 def get_sp_group() -> dist.ProcessGroup | None:
-    """Return the world process group for sequence parallelism, or None if single-process."""
-    return dist.group.WORLD if dist.is_initialized() else None
+    if not dist.is_initialized():
+        return None
+    return _SP_GROUP if _SP_GROUP is not None else dist.group.WORLD
+
+
+def get_dp_group() -> dist.ProcessGroup | None:
+    if not dist.is_initialized():
+        return None
+    return _DP_GROUP
 
 
 def barrier() -> None:

@@ -37,9 +37,11 @@ from gdnet.loss import projected_step
 from gdnet.model import GDNet
 from gdnet.utils.distributed import (
     destroy,
+    get_dp_group,
     get_sp_group,
     get_world_size,
     init_distributed,
+    init_process_groups,
     is_main_process,
 )
 from gdnet.utils.fp8 import Precision, convert_to_fp8, update_fp8_scales
@@ -220,12 +222,16 @@ def run_config(
     use_cam: bool,
     compile_model: bool,
     sp_group: dist.ProcessGroup | None,
-    world_size: int,
+    dp_group: dist.ProcessGroup | None,
+    sp_size: int,
+    dp_size: int,
+    dp_rank: int,
     local_rank: int,
     n_warmup: int = 5,
     n_steps: int = 30,
 ) -> tuple[float, float, int, int, float]:
-    T_local = T // world_size
+    T_local = T // sp_size
+    B_local = B // dp_size
     model = make_model(T_local)
     total_params, non_embed_params = param_counts(model)
 
@@ -235,10 +241,11 @@ def run_config(
         model.embed.weight.data = model.embed.weight.data.bfloat16()  # type: ignore
         convert_to_fp8(model)
 
-    if world_size > 1:
+    if dp_size > 1 or sp_size > 1:
         model = DDP(
             model,
             device_ids=[local_rank],
+            process_group=dp_group,
             static_graph=True,
             bucket_cap_mb=200,
             broadcast_buffers=False,
@@ -255,10 +262,10 @@ def run_config(
     params = list(model.parameters())  # type: ignore
 
     device = torch.device(f"cuda:{local_rank}")  # type: ignore
-    tokens = torch.randint(0, VOCAB_SIZE, (B, T_local), device=device)  # type: ignore
-    targets = torch.randint(0, VOCAB_SIZE, (B, T_local), device=device)  # type: ignore
+    tokens = torch.randint(0, VOCAB_SIZE, (B_local, T_local), device=device)  # type: ignore
+    targets = torch.randint(0, VOCAB_SIZE, (B_local, T_local), device=device)  # type: ignore
     write_chunks = (
-        torch.randint(0, VOCAB_SIZE, (B, N_WRITE, T_local), device=device)  # type: ignore
+        torch.randint(0, VOCAB_SIZE, (B_local, N_WRITE, T_local), device=device)  # type: ignore
         if use_cam and base_model.cam_enabled
         else None
     )
@@ -314,6 +321,7 @@ def main() -> None:
     parser.add_argument("--precision", choices=["fp32", "bf16", "fp8"], default="fp32")
     parser.add_argument("--cam", choices=["on", "off", "both"], default="on")
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--sp-size", type=int, default=None)
     args = parser.parse_args()
 
     precision: Precision = args.precision  # type: ignore
@@ -328,7 +336,13 @@ def main() -> None:
     init_distributed()
     world_size = get_world_size()
     local_rank = int(__import__("os").environ.get("LOCAL_RANK", 0))
+    sp_size_arg = args.sp_size if args.sp_size is not None else world_size
+    init_process_groups(sp_size_arg)
     sp_group = get_sp_group()
+    dp_group = get_dp_group()
+    sp_size = dist.get_world_size(sp_group) if sp_group is not None else 1
+    dp_size = dist.get_world_size(dp_group) if dp_group is not None else 1
+    dp_rank = dist.get_rank(dp_group) if dp_group is not None else 0
     compile_flag = args.compile
     cam_modes = [True, False] if args.cam == "both" else [args.cam == "on"]
 
@@ -361,10 +375,10 @@ def main() -> None:
                     monitor.start(live)  # type: ignore
 
                 for B, T in CONFIGS:
-                    if T % world_size != 0:
+                    if T % sp_size != 0 or B % dp_size != 0:
                         if main_proc:
                             monitor.set_status(  # type: ignore
-                                f"skip B={B} T={T}: not divisible by {world_size}"
+                                f"skip B={B} T={T}: not divisible by sp_size={sp_size} or dp_size={dp_size}"
                             )
                         continue
 
@@ -379,7 +393,10 @@ def main() -> None:
                             use_cam,
                             compile_flag,
                             sp_group,
-                            world_size,
+                            dp_group,
+                            sp_size,
+                            dp_size,
+                            dp_rank,
                             local_rank,
                         )
                         if main_proc:
