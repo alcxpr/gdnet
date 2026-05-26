@@ -67,6 +67,14 @@ def _query_chunk(key, size, rng):
     return chunk
 
 
+def _query_chunk_with_value(key, value, size, rng):
+    chunk = _noise_chunk(size, rng)
+    chunk[0] = QUERY_TOKEN
+    chunk[1] = KEY_OFFSET + key
+    chunk[2] = VALUE_OFFSET + value
+    return chunk
+
+
 class RetrievalDataset(Dataset):
     def __init__(
         self, n, n_slots, chunk_size=CHUNK_SIZE, condition=1, ambiguous_k=2, seed=0
@@ -103,11 +111,12 @@ class RetrievalDataset(Dataset):
                 target = v_new
 
             elif condition == 3:
+                value = int(rng.integers(0, N_VALUES))
                 chunks = []
                 for _ in range(n_slots):
                     chunks.append(_noise_chunk(chunk_size, rng))
-                chunks.append(_query_chunk(key, chunk_size, rng))
-                target = -1
+                chunks.append(_query_chunk_with_value(key, value, chunk_size, rng))
+                target = value
 
             else:
                 raise ValueError(f"unknown condition {condition}")
@@ -253,7 +262,7 @@ def run():
     train_ds = ConcatDataset(
         [
             RetrievalDataset(
-                N_TRAIN // 2,
+                N_TRAIN // 3,
                 N_SLOTS,
                 CHUNK_SIZE,
                 condition=1,
@@ -261,12 +270,20 @@ def run():
                 seed=0,
             ),
             RetrievalDataset(
-                N_TRAIN // 2,
+                N_TRAIN // 3,
                 N_SLOTS,
                 CHUNK_SIZE,
                 condition=2,
                 ambiguous_k=AMBIGUOUS_K,
                 seed=1,
+            ),
+            RetrievalDataset(
+                N_TRAIN // 3,
+                N_SLOTS,
+                CHUNK_SIZE,
+                condition=3,
+                ambiguous_k=AMBIGUOUS_K,
+                seed=2,
             ),
         ]
     )
@@ -299,6 +316,7 @@ def run():
             "epoch",
             "c1_acc",
             "c2_acc",
+            "c3_acc",
             "c1_r",
             "c2_r",
             "c3_r",
@@ -321,19 +339,20 @@ def run():
         if (epoch + 1) % 10 == 0:
             c1_acc, c1_r, c1_h = _eval(model, val_c1, has_target=True)
             c2_acc, c2_r, c2_h = _eval(model, val_c2, has_target=True)
-            _, c3_r, c3_h = _eval(model, val_c3, has_target=False)
+            c3_acc, c3_r, c3_h = _eval(model, val_c3, has_target=True)
             epoch_time = time.perf_counter() - t0
 
             print(
                 f"epoch={epoch + 1:3d} ({epoch_time:.1f}s)"
                 f"  C1 acc={c1_acc:.3f} R={c1_r:.3f} H={c1_h:.2f}"
                 f"  C2 acc={c2_acc:.3f} R={c2_r:.3f} H={c2_h:.2f}"
-                f"  C3 R={c3_r:.3f} H={c3_h:.2f}"
+                f"  C3 acc={c3_acc:.3f} R={c3_r:.3f} H={c3_h:.2f}"
             )
 
             hist["epoch"].append(epoch + 1)
             hist["c1_acc"].append(c1_acc)
             hist["c2_acc"].append(c2_acc)
+            hist["c3_acc"].append(c3_acc)
             hist["c1_r"].append(c1_r)
             hist["c2_r"].append(c2_r)
             hist["c3_r"].append(c3_r)
@@ -355,6 +374,7 @@ def plot(hist):
     ax = axes[0]
     ax.plot(epochs, hist["c1_acc"], marker="o", label="C1")
     ax.plot(epochs, hist["c2_acc"], marker="o", label="C2")
+    ax.plot(epochs, hist["c3_acc"], marker="o", linestyle="--", label="C3")
     ax.set_title("Accuracy")
     ax.set_xlabel("epoch")
     ax.set_ylim(0, 1.05)
